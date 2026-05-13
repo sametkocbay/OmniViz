@@ -6,14 +6,16 @@ import logging
 import shutil
 import threading
 import tkinter as tk
-import tkinter.filedialog as filedialog
 import tkinter.messagebox as messagebox
 from collections.abc import Iterable
 from pathlib import Path
 
 import customtkinter as ctk
+from PIL import Image
 
 from omniviz import __version__
+from omniviz.assets import LOGO_PATH
+from omniviz.gui.file_dialog import ask_open_file
 from omniviz.gui.import_dialog import CopyProgressDialog
 from omniviz.gui.panels import (
     BoundaryPanel,
@@ -39,6 +41,15 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _pil_to_png_bytes(img: Image.Image) -> bytes:
+    """Encode a PIL image as raw PNG bytes for ``tk.PhotoImage(data=…)``."""
+    from io import BytesIO
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class App(ctk.CTk):
     """Main window."""
 
@@ -51,8 +62,29 @@ class App(ctk.CTk):
 
         self._items: list[ViewItem] = []
         self._categories = categorize_files(self.data_dir)
+        self._last_import_dir: Path = self.data_dir if self.data_dir.exists() else Path.home()
 
+        self._apply_window_icon()
         self._build_layout()
+
+    # ---------------------------------------------------------------- branding
+
+    def _apply_window_icon(self) -> None:
+        """Set the Tk window/taskbar icon from the bundled logo, if available."""
+        if not LOGO_PATH.is_file():
+            log.debug("Logo not found at %s; skipping window icon", LOGO_PATH)
+            return
+        try:
+            with Image.open(LOGO_PATH) as raw:
+                # 64×64 is a sane window-icon size; Tk will rescale as the WM needs.
+                icon = raw.convert("RGBA").resize((64, 64), Image.LANCZOS)
+                self._icon_image = tk.PhotoImage(
+                    master=self,
+                    data=_pil_to_png_bytes(icon),
+                )
+            self.iconphoto(True, self._icon_image)
+        except (OSError, tk.TclError) as exc:                  # noqa: BLE001
+            log.debug("Could not set window icon: %s", exc)
 
     # ---------------------------------------------------------------- layout
 
@@ -67,29 +99,45 @@ class App(ctk.CTk):
         self._build_status_bar()
 
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, corner_radius=0, height=56,
+        header = ctk.CTkFrame(self, corner_radius=0, height=64,
                               fg_color=("gray92", "gray15"))
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
-        header.grid_columnconfigure(1, weight=1)
+        header.grid_columnconfigure(2, weight=1)
+
+        # Logo (falls back to a text-only title if the logo file is missing)
+        self._header_logo: ctk.CTkImage | None = None
+        if LOGO_PATH.is_file():
+            try:
+                with Image.open(LOGO_PATH) as raw:
+                    pil_img = raw.convert("RGBA")
+                self._header_logo = ctk.CTkImage(
+                    light_image=pil_img, dark_image=pil_img, size=(48, 48),
+                )
+                ctk.CTkLabel(header, image=self._header_logo, text="").grid(
+                    row=0, column=0, sticky="w", padx=(PAD_X * 2, 6),
+                    pady=(PAD_Y // 2, PAD_Y // 2),
+                )
+            except OSError as exc:                             # noqa: BLE001
+                log.debug("Could not load header logo: %s", exc)
 
         ctk.CTkLabel(
             header,
             text="OmniViz",
             font=ctk.CTkFont(size=22, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", padx=PAD_X * 2, pady=PAD_Y)
+        ).grid(row=0, column=1, sticky="w", padx=(4, PAD_X), pady=PAD_Y)
 
         ctk.CTkLabel(
             header,
             text="Stellarator & fusion-reactor geometry viewer",
             text_color=("gray35", "gray70"),
-        ).grid(row=0, column=1, sticky="w", padx=4, pady=PAD_Y)
+        ).grid(row=0, column=2, sticky="w", padx=4, pady=PAD_Y)
 
         ctk.CTkButton(
             header,
             text="Import file…",
             width=130,
             command=self._import_file,
-        ).grid(row=0, column=2, sticky="e", padx=(PAD_X, 4), pady=PAD_Y)
+        ).grid(row=0, column=3, sticky="e", padx=(PAD_X, 4), pady=PAD_Y)
 
         self._appearance = ctk.CTkSegmentedButton(
             header,
@@ -97,7 +145,7 @@ class App(ctk.CTk):
             command=self._set_appearance,
         )
         self._appearance.set("Dark")
-        self._appearance.grid(row=0, column=3, sticky="e", padx=PAD_X * 2, pady=PAD_Y)
+        self._appearance.grid(row=0, column=4, sticky="e", padx=PAD_X * 2, pady=PAD_Y)
 
     def _build_left_pane(self) -> None:
         self._left_pane = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -265,18 +313,21 @@ class App(ctk.CTk):
 
     def _import_file(self) -> None:
         """Pick a file from anywhere on disk and copy it into ``data/``."""
-        src_str = filedialog.askopenfilename(
-            parent=self,
+        src = ask_open_file(
+            self,
             title="Choose a file to import into the data folder",
+            initialdir=self._last_import_dir,
             filetypes=list(self._IMPORT_FILETYPES),
         )
-        if not src_str:
+        if src is None:
             return
 
-        src = Path(src_str)
         if not src.is_file():
             messagebox.showerror("Import failed", f"Not a regular file:\n{src}")
             return
+
+        # Remember this directory for the next import.
+        self._last_import_dir = src.parent
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
         dst = self.data_dir / src.name

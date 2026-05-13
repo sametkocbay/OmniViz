@@ -1,4 +1,8 @@
-# OmniViz
+<p align="center">
+  <img src="omniviz/assets/omniviz_logo.png" alt="OmniViz logo" width="220">
+</p>
+
+<h1 align="center">OmniViz</h1>
 
 > A modern Python GUI for visualizing stellarator and fusion-reactor
 > geometries: JOREK boundary surfaces, Patran/VTK meshes, XYZ point clouds,
@@ -165,9 +169,13 @@ OmniViz/
 │   ├── io.py               # parsers (XYZ, vector field, boundary, Patran)
 │   ├── plotter.py          # UnifiedPlotter (PyVista wrapper)
 │   ├── models.py           # ViewItem dataclasses (PointCloudItem, …)
+│   ├── assets/             # bundled static assets
+│   │   └── omniviz_logo.png
 │   └── gui/
-│       ├── app.py          # main window
+│       ├── app.py          # main window (loads logo as window icon)
 │       ├── panels.py       # one panel per data type
+│       ├── file_dialog.py  # themed file browser
+│       ├── import_dialog.py# copy-with-progress dialog
 │       └── theme.py
 ├── data/                   # sample input files
 ├── pyproject.toml

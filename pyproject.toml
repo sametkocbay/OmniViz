@@ -47,6 +47,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["omniviz"]
+# Non-Python files inside the package (e.g. omniviz/assets/*.png) are
+# included automatically by hatchling — no extra config needed.
 
 # ---------------------------------------------------------------------------
 # Tooling
