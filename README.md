@@ -94,11 +94,28 @@ The window has:
 2. **Right pane** — the *render queue* (cards showing each item you
    added), an optional **clip plane**, and the big **Render plot**
    button.
-3. **Header** — appearance toggle (Dark / Light / System).
+3. **Header** — **Import file…** (browse anywhere on disk → copy into
+   `data/` with a live progress bar) and the appearance toggle
+   (Dark / Light / System).
 
 Items in the queue can be removed individually (`✕`) or cleared all at
 once. Render hands the queue off to PyVista, which opens a separate
 interactive 3D window.
+
+### Importing data from elsewhere
+
+Click **Import file…** in the header to open a native file picker.
+Pick any `.dat`, `.txt`, `.vtk`, `.msh`, or `.out` file from anywhere
+on disk and OmniViz will:
+
+1. Copy it into the active `data/` folder (chunked, with a progress
+   bar that shows speed and ETA — cancellable).
+2. Prompt before overwriting if a file of the same name already
+   exists.
+3. Re-categorize `data/` and refresh the panel file lists so the new
+   file appears immediately in the relevant tab.
+
+Tiny files (< 64 KiB) skip the progress dialog and copy synchronously.
 
 ### Programmatic use
 

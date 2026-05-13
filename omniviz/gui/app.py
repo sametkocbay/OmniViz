@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import tkinter as tk
+import tkinter.filedialog as filedialog
 import tkinter.messagebox as messagebox
 from collections.abc import Iterable
 from pathlib import Path
@@ -12,6 +14,7 @@ from pathlib import Path
 import customtkinter as ctk
 
 from omniviz import __version__
+from omniviz.gui.import_dialog import CopyProgressDialog
 from omniviz.gui.panels import (
     BoundaryPanel,
     PatranMeshPanel,
@@ -81,25 +84,43 @@ class App(ctk.CTk):
             text_color=("gray35", "gray70"),
         ).grid(row=0, column=1, sticky="w", padx=4, pady=PAD_Y)
 
+        ctk.CTkButton(
+            header,
+            text="Import file…",
+            width=130,
+            command=self._import_file,
+        ).grid(row=0, column=2, sticky="e", padx=(PAD_X, 4), pady=PAD_Y)
+
         self._appearance = ctk.CTkSegmentedButton(
             header,
             values=["Dark", "Light", "System"],
             command=self._set_appearance,
         )
         self._appearance.set("Dark")
-        self._appearance.grid(row=0, column=2, sticky="e", padx=PAD_X * 2, pady=PAD_Y)
+        self._appearance.grid(row=0, column=3, sticky="e", padx=PAD_X * 2, pady=PAD_Y)
 
     def _build_left_pane(self) -> None:
-        tabs = ctk.CTkTabview(self, corner_radius=CORNER_RADIUS)
-        tabs.grid(row=1, column=0, sticky="nsew", padx=(PAD_X, 6), pady=PAD_Y)
+        self._left_pane = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self._left_pane.grid(row=1, column=0, sticky="nsew", padx=(PAD_X, 6), pady=PAD_Y)
+        self._left_pane.grid_columnconfigure(0, weight=1)
+        self._left_pane.grid_rowconfigure(0, weight=1)
+        self._populate_tabs()
+
+    def _populate_tabs(self) -> None:
+        """(Re)build the tab view from ``self._categories``."""
+        for child in self._left_pane.winfo_children():
+            child.destroy()
+
+        tabs = ctk.CTkTabview(self._left_pane, corner_radius=CORNER_RADIUS)
+        tabs.grid(row=0, column=0, sticky="nsew")
 
         tab_specs = [
-            ("Point Cloud", PointCloudPanel, "point_cloud"),
-            ("Boundary",    BoundaryPanel,    "boundary"),
-            ("VTK",         VtkMeshPanel,     "vtk"),
-            ("Patran",      PatranMeshPanel,  "patran"),
+            ("Point Cloud",  PointCloudPanel,  "point_cloud"),
+            ("Boundary",     BoundaryPanel,    "boundary"),
+            ("VTK",          VtkMeshPanel,     "vtk"),
+            ("Patran",       PatranMeshPanel,  "patran"),
             ("Vector Field", VectorFieldPanel, "vector_field"),
-            ("Wire",        WirePanel,        None),
+            ("Wire",         WirePanel,        None),
         ]
         for name, panel_cls, key in tab_specs:
             tab = tabs.add(name)
@@ -231,6 +252,75 @@ class App(ctk.CTk):
 
     def _status_text(self) -> str:
         return f"{len(self._items)} item(s) queued · data dir: {self.data_dir}"
+
+    # -------------------------------------------------------------- import
+
+    _IMPORT_FILETYPES = (
+        ("All supported", "*.dat *.txt *.vtk *.msh *.out"),
+        ("XYZ / vector field data", "*.dat *.txt"),
+        ("VTK mesh", "*.vtk"),
+        ("Patran neutral mesh", "*.msh *.out"),
+        ("All files", "*.*"),
+    )
+
+    def _import_file(self) -> None:
+        """Pick a file from anywhere on disk and copy it into ``data/``."""
+        src_str = filedialog.askopenfilename(
+            parent=self,
+            title="Choose a file to import into the data folder",
+            filetypes=list(self._IMPORT_FILETYPES),
+        )
+        if not src_str:
+            return
+
+        src = Path(src_str)
+        if not src.is_file():
+            messagebox.showerror("Import failed", f"Not a regular file:\n{src}")
+            return
+
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        dst = self.data_dir / src.name
+
+        # Same file? Nothing to do.
+        try:
+            if dst.exists() and dst.resolve() == src.resolve():
+                messagebox.showinfo(
+                    "Already in data folder",
+                    f"{src.name} is already in {self.data_dir}.",
+                )
+                return
+        except OSError:
+            pass
+
+        if dst.exists():
+            overwrite = messagebox.askyesno(
+                "Overwrite?",
+                f"{dst.name} already exists in {self.data_dir}.\n\nReplace it?",
+            )
+            if not overwrite:
+                return
+
+        self._status.configure(text=f"Importing {src.name}…")
+        # Tiny files: do a plain copy without the progress dialog.
+        try:
+            if src.stat().st_size < 64 * 1024:
+                shutil.copy2(src, dst)
+                self._on_import_done(dst)
+                return
+        except OSError as exc:
+            messagebox.showerror("Import failed", str(exc))
+            self._status.configure(text=self._status_text())
+            return
+
+        CopyProgressDialog(self, src=src, dst=dst, on_done=self._on_import_done)
+
+    def _on_import_done(self, dst: Path | None) -> None:
+        if dst is None:
+            self._status.configure(text=self._status_text())
+            return
+        self._categories = categorize_files(self.data_dir)
+        self._populate_tabs()
+        self._status.configure(text=f"Imported {dst.name} · {self._status_text()}")
 
     # -------------------------------------------------------------- render
 
