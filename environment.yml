@@ -1,0 +1,23 @@
+# Conda environment definition for OmniViz.
+#
+# Create:    conda env create -f environment.yml
+# Update:    conda env update -f environment.yml --prune
+# Activate:  conda activate omniviz
+#
+# This installs the runtime dependencies via conda-forge and then installs
+# OmniViz itself (editable) via pip so the `omniviz` console script becomes
+# available.
+
+name: omniviz
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10,<3.13
+  - numpy>=1.24
+  - pandas>=2.0
+  - pyvista>=0.43
+  - vtk>=9.2
+  - pip
+  - pip:
+      - customtkinter>=5.2.2
+      - -e .

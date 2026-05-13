@@ -1,0 +1,413 @@
+"""Unified PyVista plotter for OmniViz.
+
+A single ``UnifiedPlotter`` accumulates renderables (point clouds, boundary
+surfaces, hex meshes, VTK meshes, vector fields, wire loops) and presents
+them in one window. Each ``add_*`` returns ``self`` for fluent chaining.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import pyvista as pv
+
+from omniviz import io as oio
+from omniviz.io import BoundaryData
+
+log = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Boundary reconstruction (Hermite poloidal × Fourier toroidal)
+# --------------------------------------------------------------------------- #
+
+def _hermite_basis(s: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    s2 = s * s
+    s3 = s2 * s
+    return (
+        1.0 - 3.0 * s2 + 2.0 * s3,
+        s - 2.0 * s2 + s3,
+        3.0 * s2 - 2.0 * s3,
+        -s2 + s3,
+    )
+
+
+def reconstruct_boundary_surface(
+    data: BoundaryData,
+    n_phi: int = 60,
+    n_s: int = 10,
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Reconstruct (X, Y, Z) surface patches from a parsed boundary."""
+    phi = np.linspace(0.0, 2.0 * np.pi, n_phi)
+
+    fourier = np.zeros((data.n_harm, n_phi))
+    fourier[0, :] = 1.0
+    for k in range(1, (data.n_harm - 1) // 2 + 1):
+        idx_cos = 2 * k - 1
+        idx_sin = 2 * k
+        if idx_sin < data.n_harm:
+            arg = k * data.n_period * phi
+            fourier[idx_cos, :] = np.cos(arg)
+            fourier[idx_sin, :] = np.sin(arg)
+
+    s_arr = np.linspace(0.0, 1.0, n_s)
+    h1, h2, h3, h4 = _hermite_basis(s_arr)
+
+    patches: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for el in data.elements:
+        sz1_R, sz1_Z = el.sizes[0]
+        sz2_R, sz2_Z = el.sizes[1]
+
+        R_s = (
+            np.outer(el.vals_R[0], h1)
+            + np.outer(el.deriv_R[0] * sz1_R, h2)
+            + np.outer(el.vals_R[1], h3)
+            + np.outer(el.deriv_R[1] * sz2_R, h4)
+        )
+        Z_s = (
+            np.outer(el.vals_Z[0], h1)
+            + np.outer(el.deriv_Z[0] * sz1_Z, h2)
+            + np.outer(el.vals_Z[1], h3)
+            + np.outer(el.deriv_Z[1] * sz2_Z, h4)
+        )
+
+        R_surf = R_s.T @ fourier
+        Z_surf = Z_s.T @ fourier
+        X_surf = R_surf * np.cos(phi)
+        Y_surf = R_surf * np.sin(phi)
+        patches.append((X_surf, Y_surf, Z_surf))
+
+    return patches
+
+
+# --------------------------------------------------------------------------- #
+# UnifiedPlotter
+# --------------------------------------------------------------------------- #
+
+_AXIS_NORMALS = {
+    "x":  (1.0, 0.0, 0.0),
+    "y":  (0.0, 1.0, 0.0),
+    "z":  (0.0, 0.0, 1.0),
+    "-x": (-1.0, 0.0, 0.0),
+    "-y": (0.0, -1.0, 0.0),
+    "-z": (0.0, 0.0, -1.0),
+}
+
+
+class UnifiedPlotter:
+    """Compose multiple data sources into one PyVista window."""
+
+    def __init__(self, background: str = "white", title: str | None = None) -> None:
+        self._plotter = pv.Plotter()
+        self._plotter.set_background(background)
+        self._title = title
+        self._has_content = False
+        self._labels: list[str] = []
+        self._clip: dict[str, Any] | None = None
+
+    # -- public API ---------------------------------------------------------- #
+
+    @property
+    def plotter(self) -> pv.Plotter:
+        """Underlying PyVista plotter for advanced customization."""
+        return self._plotter
+
+    def set_clip_plane(
+        self,
+        normal: str | Sequence[float] = "x",
+        origin: Sequence[float] | None = None,
+        invert: bool = False,
+    ) -> UnifiedPlotter:
+        """Activate a clip plane applied to subsequent meshes."""
+        if isinstance(normal, str):
+            normal_vec = _AXIS_NORMALS.get(normal.lower(), (1.0, 0.0, 0.0))
+        else:
+            normal_vec = tuple(float(c) for c in normal)
+        self._clip = {"normal": normal_vec, "origin": origin, "invert": invert}
+        return self
+
+    def add_point_cloud(
+        self,
+        source: pd.DataFrame | np.ndarray | str | Path,
+        *,
+        color: str = "red",
+        point_size: int = 5,
+        opacity: float = 1.0,
+        sample_frac: float = 1.0,
+        label: str | None = None,
+        render_as_spheres: bool = True,
+    ) -> UnifiedPlotter:
+        points = self._coerce_points(source, sample_frac)
+        if points.size == 0:
+            log.warning("Point cloud '%s' has no valid points", label or "<unnamed>")
+            return self
+
+        log.info(
+            "Point cloud%s: %d points, bbox=%s..%s",
+            f" ({label})" if label else "",
+            len(points),
+            np.round(points.min(axis=0), 3).tolist(),
+            np.round(points.max(axis=0), 3).tolist(),
+        )
+
+        self._plotter.add_points(
+            pv.PolyData(points),
+            color=color,
+            point_size=point_size,
+            opacity=opacity,
+            render_points_as_spheres=render_as_spheres,
+            label=label,
+        )
+        return self._mark(label)
+
+    def add_boundary(
+        self,
+        path: str | Path,
+        *,
+        color: str = "cyan",
+        opacity: float = 0.5,
+        show_edges: bool = True,
+        edge_color: str = "black",
+        line_width: float = 0.5,
+        n_phi: int = 60,
+        n_s: int = 10,
+        label: str | None = None,
+    ) -> UnifiedPlotter:
+        data = oio.read_boundary(path)
+        if data is None:
+            log.error("Boundary file '%s' not found or invalid", path)
+            return self
+
+        patches = reconstruct_boundary_surface(data, n_phi=n_phi, n_s=n_s)
+        multi = pv.MultiBlock([pv.StructuredGrid(x, y, z) for (x, y, z) in patches])
+        mesh = self._maybe_clip(multi.combine() if self._clip else multi)
+
+        self._plotter.add_mesh(
+            mesh,
+            color=color,
+            show_edges=show_edges,
+            edge_color=edge_color,
+            line_width=line_width,
+            opacity=opacity,
+            smooth_shading=True,
+            specular=0.5,
+            label=label,
+        )
+
+        if self._title is None:
+            self._title = f"JOREK boundary  (harmonics {data.n_harm} · period {data.n_period})"
+        return self._mark(label)
+
+    def add_hex_mesh(
+        self,
+        df_nodes: pd.DataFrame,
+        elements_hex: Sequence[Sequence[int]],
+        *,
+        color: str = "violet",
+        opacity: float = 1.0,
+        show_edges: bool = True,
+        label: str | None = None,
+    ) -> UnifiedPlotter:
+        df = df_nodes.sort_values("node_id")
+        points = df[["x", "y", "z"]].to_numpy()
+        id_to_idx = {nid: i for i, nid in enumerate(df["node_id"])}
+
+        cells: list[list[int]] = []
+        cell_types: list[int] = []
+        for hex_nodes in elements_hex:
+            try:
+                idx = [id_to_idx[n] for n in hex_nodes]
+            except KeyError:
+                continue
+            cells.append([8, *idx])
+            cell_types.append(pv.CellType.HEXAHEDRON)
+
+        if not cells:
+            log.warning("No valid hex elements")
+            return self
+
+        grid = pv.UnstructuredGrid(np.hstack(cells), cell_types, points)
+        log.info("Hex mesh: %d elements, %d nodes", len(elements_hex), len(df_nodes))
+
+        self._plotter.add_mesh(
+            self._maybe_clip(grid),
+            color=color,
+            opacity=opacity,
+            show_edges=show_edges,
+            label=label,
+        )
+        return self._mark(label)
+
+    def add_vtk_mesh(
+        self,
+        path: str | Path,
+        *,
+        color: str = "lightblue",
+        opacity: float = 1.0,
+        show_edges: bool = True,
+        label: str | None = None,
+    ) -> UnifiedPlotter:
+        mesh = pv.read(str(path))
+        log.info("VTK mesh: %d points, %d cells", mesh.n_points, mesh.n_cells)
+        self._plotter.add_mesh(
+            self._maybe_clip(mesh),
+            color=color,
+            opacity=opacity,
+            show_edges=show_edges,
+            label=label,
+        )
+        return self._mark(label)
+
+    def add_wire(
+        self,
+        *,
+        r0: float,
+        z0: float,
+        alfa_wire_deg: float,
+        color: str = "orange",
+        tube_radius: float | None = None,
+        n_phi: int = 200,
+        label: str | None = None,
+    ) -> UnifiedPlotter:
+        """Add a tilted circular current filament loop."""
+        alfa = np.deg2rad(alfa_wire_deg)
+        t = np.linspace(0.0, 2.0 * np.pi, n_phi, endpoint=False)
+        x_local = r0 * np.cos(t)
+        y_local = r0 * np.sin(t)
+
+        # Rotate the coil plane about the Y axis by alfa.
+        x_rot = x_local * np.cos(alfa)
+        y_rot = y_local
+        z_rot = -x_local * np.sin(alfa) + z0
+
+        # Close the loop for a clean spline tube.
+        points = np.column_stack([
+            np.append(x_rot, x_rot[0]),
+            np.append(y_rot, y_rot[0]),
+            np.append(z_rot, z_rot[0]),
+        ])
+
+        radius = tube_radius if (tube_radius and tube_radius > 0) else r0 * 0.02
+        tube = pv.Spline(points, n_phi * 4).tube(radius=radius)
+        log.info("Wire: r0=%.4f z0=%.4f alfa=%.3f° tube_r=%.4f",
+                 r0, z0, alfa_wire_deg, radius)
+
+        self._plotter.add_mesh(tube, color=color, label=label)
+        return self._mark(label)
+
+    def add_vector_field(
+        self,
+        source: pd.DataFrame | str | Path,
+        *,
+        scale: float = 1.0,
+        color: str = "crimson",
+        colormap: str | None = None,
+        color_by_magnitude: bool = False,
+        sample_frac: float = 1.0,
+        label: str | None = None,
+    ) -> UnifiedPlotter:
+        df = oio.read_vector_field(source) if isinstance(source, (str, Path)) else source.copy()
+
+        required = {"x", "y", "z", "Bx", "By", "Bz"}
+        if not required.issubset(df.columns):
+            log.error("Vector field requires columns %s, got %s", required, list(df.columns))
+            return self
+
+        if 0.0 < sample_frac < 1.0:
+            df = df.sample(frac=sample_frac, random_state=42)
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
+        if df.empty:
+            log.warning("Vector field '%s' is empty after filtering", label or "<unnamed>")
+            return self
+
+        points = df[["x", "y", "z"]].to_numpy()
+        vectors = df[["Bx", "By", "Bz"]].to_numpy() * scale
+        magnitudes = np.linalg.norm(vectors, axis=1)
+        log.info("Vector field%s: %d arrows, |B| in [%.4g, %.4g]",
+                 f" ({label})" if label else "", len(points),
+                 magnitudes.min(), magnitudes.max())
+
+        cloud = pv.PolyData(points)
+        cloud["vectors"] = vectors
+        cloud["magnitude"] = magnitudes
+        glyphs = cloud.glyph(orient="vectors", scale="magnitude", factor=1.0)
+
+        if color_by_magnitude:
+            self._plotter.add_mesh(glyphs, scalars="magnitude",
+                                   cmap=colormap or "plasma", label=label)
+        else:
+            self._plotter.add_mesh(glyphs, color=color, label=label)
+        return self._mark(label)
+
+    def show(
+        self,
+        *,
+        show_axes: bool = True,
+        show_bounds: bool = True,
+        show_legend: bool = True,
+    ) -> None:
+        if not self._has_content:
+            log.warning("Nothing to render")
+            return
+        if show_axes:
+            self._plotter.add_axes()
+        if show_bounds:
+            self._plotter.show_bounds(grid="front", location="outer", all_edges=True)
+        if self._title:
+            self._plotter.add_text(self._title, position="upper_left", font_size=10)
+        if show_legend and self._labels:
+            self._plotter.add_legend()
+        if self._clip:
+            self._plotter.add_text(
+                f"clip: normal={self._clip['normal']}",
+                position="lower_left",
+                font_size=8,
+            )
+        self._plotter.show()
+
+    # -- internal helpers ---------------------------------------------------- #
+
+    def _mark(self, label: str | None) -> UnifiedPlotter:
+        self._has_content = True
+        if label:
+            self._labels.append(label)
+        return self
+
+    def _maybe_clip(self, mesh: pv.DataSet) -> pv.DataSet:
+        if not self._clip:
+            return mesh
+        origin = self._clip["origin"] or mesh.center
+        try:
+            return mesh.clip(
+                normal=self._clip["normal"],
+                origin=origin,
+                invert=self._clip["invert"],
+            )
+        except Exception as exc:                                  # pragma: no cover
+            log.warning("Clip failed (%s); rendering unclipped mesh", exc)
+            return mesh
+
+    @staticmethod
+    def _coerce_points(
+        source: pd.DataFrame | np.ndarray | str | Path,
+        sample_frac: float,
+    ) -> np.ndarray:
+        if isinstance(source, (str, Path)):
+            df = oio.read_xyz_data(source)
+            points = df[["x", "y", "z"]].to_numpy()
+        elif isinstance(source, pd.DataFrame):
+            df = source.sample(frac=sample_frac, random_state=42) if sample_frac < 1.0 else source
+            points = df[["x", "y", "z"]].to_numpy()
+        else:
+            points = np.asarray(source)
+            if sample_frac < 1.0:
+                rng = np.random.default_rng(42)
+                idx = rng.choice(len(points), int(len(points) * sample_frac), replace=False)
+                points = points[idx]
+        valid = np.all(np.isfinite(points), axis=1)
+        return points[valid]
