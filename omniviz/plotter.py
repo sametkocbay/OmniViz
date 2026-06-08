@@ -8,13 +8,16 @@ them in one window. Each ``add_*`` returns ``self`` for fluent chaining.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 import pyvista as pv
+
+if TYPE_CHECKING:
+    from PIL import Image as PILImage
 
 from omniviz import io as oio
 from omniviz.io import BoundaryData
@@ -109,6 +112,17 @@ class UnifiedPlotter:
         self._has_content = False
         self._labels: list[str] = []
         self._clip: dict[str, Any] | None = None
+
+        # -- photo-mode / screenshot state
+        self._axes_on = False
+        self._bounds_on = False
+        self._on_capture: Callable[[PILImage.Image], None] | None = None
+        self._capture_scale = 3
+        self._capture_busy = False
+        self._camera_widget: Any = None
+        self._camera_rep: Any = None
+        self._camera_img: Any = None
+        self._help_actor: Any = None
 
     # -- public API ---------------------------------------------------------- #
 
@@ -350,25 +364,244 @@ class UnifiedPlotter:
         show_axes: bool = True,
         show_bounds: bool = True,
         show_legend: bool = True,
+        photo_mode: bool = False,
+        on_capture: Callable[[PILImage.Image], None] | None = None,
+        capture_scale: int = 3,
     ) -> None:
         if not self._has_content:
             log.warning("Nothing to render")
             return
+
+        # "Photo mode" starts with a clean canvas: no axes, grid, legend or text.
+        if photo_mode:
+            show_axes = show_bounds = show_legend = False
+
+        self._axes_on = show_axes
+        self._bounds_on = show_bounds
+
         if show_axes:
             self._plotter.add_axes()
         if show_bounds:
             self._plotter.show_bounds(grid="front", location="outer", all_edges=True)
-        if self._title:
+        if self._title and not photo_mode:
             self._plotter.add_text(self._title, position="upper_left", font_size=10)
         if show_legend and self._labels:
             self._plotter.add_legend()
-        if self._clip:
+        if self._clip and not photo_mode:
             self._plotter.add_text(
                 f"clip: normal={self._clip['normal']}",
                 position="lower_left",
                 font_size=8,
             )
+
+        self._install_photo_tools(on_capture, capture_scale)
         self._plotter.show()
+
+    # -- photo mode / screenshots ------------------------------------------- #
+
+    def capture_highres(self, scale: int | None = None) -> "PILImage.Image":
+        """Render the current view to a high-resolution PIL image.
+
+        The on-screen camera button and key hints are hidden for the shot so
+        they never end up in the exported figure.
+        """
+        from PIL import Image
+
+        scale = scale or self._capture_scale
+
+        hidden_widget = False
+        if self._camera_widget is not None:
+            try:
+                self._camera_widget.Off()
+                if self._camera_rep is not None:
+                    self._camera_rep.VisibilityOff()
+                hidden_widget = True
+            except Exception:                                    # noqa: BLE001
+                pass
+
+        help_vis = None
+        if self._help_actor is not None:
+            try:
+                help_vis = self._help_actor.GetVisibility()
+                self._help_actor.SetVisibility(False)
+            except Exception:                                    # noqa: BLE001
+                help_vis = None
+
+        self._plotter.render()
+        try:
+            arr = self._plotter.screenshot(return_img=True, scale=scale)
+        finally:
+            if hidden_widget:
+                try:
+                    if self._camera_rep is not None:
+                        self._camera_rep.VisibilityOn()
+                    self._camera_widget.On()
+                except Exception:                                # noqa: BLE001
+                    pass
+            if self._help_actor is not None and help_vis is not None:
+                try:
+                    self._help_actor.SetVisibility(help_vis)
+                except Exception:                                # noqa: BLE001
+                    pass
+            self._plotter.render()
+
+        return Image.fromarray(np.asarray(arr))
+
+    def _do_capture(self, *_args: Any) -> None:
+        """Camera-button / hot-key handler: grab a shot and hand it off."""
+        if self._capture_busy:
+            return
+        self._capture_busy = True
+        try:
+            img = self.capture_highres()
+        except Exception:                                        # noqa: BLE001
+            log.exception("Screenshot capture failed")
+            return
+        finally:
+            self._capture_busy = False
+
+        if self._on_capture is not None:
+            try:
+                self._on_capture(img)
+            except Exception:                                    # noqa: BLE001
+                log.exception("Screenshot handler failed")
+        else:
+            from datetime import datetime
+
+            name = f"omniviz_{datetime.now():%Y%m%d_%H%M%S}.png"
+            img.save(name)
+            log.info("Saved screenshot to %s", name)
+
+    def _toggle_axes(self) -> None:
+        self._axes_on = not self._axes_on
+        try:
+            self._plotter.show_axes() if self._axes_on else self._plotter.hide_axes()
+            self._plotter.render()
+        except Exception:                                        # noqa: BLE001
+            log.debug("Axes toggle failed", exc_info=True)
+
+    def _toggle_bounds(self) -> None:
+        self._bounds_on = not self._bounds_on
+        try:
+            if self._bounds_on:
+                self._plotter.show_bounds(grid="front", location="outer", all_edges=True)
+            else:
+                self._plotter.remove_bounds_axes()
+            self._plotter.render()
+        except Exception:                                        # noqa: BLE001
+            log.debug("Bounds toggle failed", exc_info=True)
+
+    def _install_photo_tools(
+        self,
+        on_capture: Callable[[PILImage.Image], None] | None,
+        capture_scale: int,
+    ) -> None:
+        self._on_capture = on_capture
+        self._capture_scale = max(1, int(capture_scale))
+
+        # Hot-keys: live cleanup + capture without leaving the 3-D view.
+        try:
+            self._plotter.add_key_event("c", self._do_capture)
+            self._plotter.add_key_event("a", self._toggle_axes)
+            self._plotter.add_key_event("g", self._toggle_bounds)
+        except Exception:                                        # noqa: BLE001
+            log.debug("Could not bind photo hot-keys", exc_info=True)
+
+        # Faint key hint, hidden automatically while a shot is taken.
+        try:
+            self._help_actor = self._plotter.add_text(
+                "[c] photo   [a] axes   [g] grid",
+                position="lower_right",
+                font_size=7,
+                color="gray",
+            )
+        except Exception:                                        # noqa: BLE001
+            self._help_actor = None
+
+        self._make_camera_button()
+
+    def _make_camera_button(self) -> None:
+        """Add a clickable camera icon to the top-left of the render window."""
+        try:
+            import vtk
+
+            iren = getattr(self._plotter.iren, "interactor", None)
+            if iren is None:
+                return
+
+            self._camera_img = self._np_to_vtk_image(self._camera_icon(48))
+
+            rep = vtk.vtkTexturedButtonRepresentation2D()
+            rep.SetNumberOfStates(1)
+            rep.SetButtonTexture(0, self._camera_img)
+            rep.SetPlaceFactor(1)
+
+            size, margin = 46, 14
+
+            def _place() -> None:
+                w, h = self._plotter.window_size
+                rep.PlaceWidget(
+                    [margin, margin + size, h - margin - size, h - margin, 0.0, 0.0]
+                )
+
+            _place()
+
+            widget = vtk.vtkButtonWidget()
+            widget.SetInteractor(iren)
+            widget.SetRepresentation(rep)
+            widget.On()
+            widget.AddObserver("StateChangedEvent", self._do_capture)
+
+            # Keep the icon anchored to the top-left when the window resizes.
+            iren.AddObserver("ConfigureEvent", lambda *_: _place())
+
+            self._camera_widget = widget
+            self._camera_rep = rep
+        except Exception:                                        # noqa: BLE001
+            log.debug("Camera button unavailable; use the [c] hot-key", exc_info=True)
+            self._camera_widget = None
+
+    @staticmethod
+    def _camera_icon(size: int = 48) -> np.ndarray:
+        """Draw a simple camera glyph as an RGBA array for the toolbar button."""
+        from PIL import Image, ImageDraw
+
+        s = size
+        img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        accent = (31, 106, 165, 255)
+        white = (255, 255, 255, 255)
+
+        d.rounded_rectangle([1, 1, s - 2, s - 2], radius=s * 0.18, fill=accent)
+        d.rounded_rectangle(
+            [s * 0.36, s * 0.24, s * 0.58, s * 0.36], radius=s * 0.03, fill=white
+        )
+        d.rounded_rectangle(
+            [s * 0.14, s * 0.34, s * 0.86, s * 0.76], radius=s * 0.08, fill=white
+        )
+        cx, cy, r = s * 0.5, s * 0.55, s * 0.135
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=accent)
+        d.ellipse(
+            [cx - r * 0.5, cy - r * 0.5, cx + r * 0.5, cy + r * 0.5], fill=white
+        )
+        return np.asarray(img, dtype=np.uint8)
+
+    @staticmethod
+    def _np_to_vtk_image(arr: np.ndarray) -> Any:
+        import vtk
+        from vtkmodules.util.numpy_support import numpy_to_vtk
+
+        h, w, c = arr.shape
+        # VTK image origin is bottom-left, so flip vertically.
+        flipped = np.ascontiguousarray(arr[::-1])
+        image = vtk.vtkImageData()
+        image.SetDimensions(w, h, 1)
+        vtk_arr = numpy_to_vtk(
+            flipped.reshape(-1, c), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
+        )
+        vtk_arr.SetNumberOfComponents(c)
+        image.GetPointData().SetScalars(vtk_arr)
+        return image
 
     # -- internal helpers ---------------------------------------------------- #
 

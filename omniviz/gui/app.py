@@ -225,6 +225,23 @@ class App(ctk.CTk):
         self._clip_dir.set("y")
         self._clip_dir.grid(row=1, column=1, sticky="ew", padx=PAD_X, pady=(0, PAD_Y))
 
+        # --- photo mode
+        photo = ctk.CTkFrame(pane, corner_radius=CORNER_RADIUS)
+        photo.grid(row=5, column=0, sticky="ew", padx=PAD_X, pady=4)
+        photo.grid_columnconfigure(0, weight=1)
+
+        self._photo_mode = ctk.CTkSwitch(
+            photo, text="Photo mode (clean — no axes/grid)")
+        self._photo_mode.grid(row=0, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 2))
+
+        ctk.CTkLabel(
+            photo,
+            text="In the 3-D window: click the 📷 (top-left) or press "
+                 "[c] to capture · [a] axes · [g] grid",
+            text_color=("gray35", "gray70"),
+            wraplength=300, justify="left", font=ctk.CTkFont(size=11),
+        ).grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(0, PAD_Y))
+
         # --- big render button
         self._render_btn = ctk.CTkButton(
             pane,
@@ -233,7 +250,7 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
             command=self._render,
         )
-        self._render_btn.grid(row=4, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_X))
+        self._render_btn.grid(row=6, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_X))
 
     def _build_status_bar(self) -> None:
         self._status = ctk.CTkLabel(
@@ -383,13 +400,14 @@ class App(ctk.CTk):
         items = list(self._items)
         clip_enabled = bool(self._clip_enabled.get())
         clip_dir = self._clip_dir.get()
+        photo_mode = bool(self._photo_mode.get())
 
         self._render_btn.configure(state="disabled", text="Rendering…")
         self._status.configure(text="Building plot…")
 
         thread = threading.Thread(
             target=self._render_worker,
-            args=(items, clip_enabled, clip_dir),
+            args=(items, clip_enabled, clip_dir, photo_mode),
             daemon=True,
         )
         thread.start()
@@ -399,6 +417,7 @@ class App(ctk.CTk):
         items: Iterable[ViewItem],
         clip_enabled: bool,
         clip_dir: str,
+        photo_mode: bool,
     ) -> None:
         try:
             plotter = UnifiedPlotter(background="white", title=None)
@@ -406,33 +425,56 @@ class App(ctk.CTk):
                 plotter.set_clip_plane(clip_dir)
             for item in items:
                 item.apply(plotter, self.data_dir)
-            self.after(0, self._finalize_render_ready, plotter)
+            self.after(0, self._finalize_render_ready, plotter, photo_mode)
         except Exception as exc:                      # noqa: BLE001
             log.exception("Rendering failed")
             self.after(0, self._finalize_render_error, exc)
 
-    def _finalize_render_ready(self, plotter: UnifiedPlotter) -> None:
+    def _finalize_render_ready(
+        self, plotter: UnifiedPlotter, photo_mode: bool
+    ) -> None:
         self._render_btn.configure(state="normal", text="Render plot")
         self._status.configure(text="Opening PyVista window…")
         # PyVista's plotter.show() must run on the main thread
         # (the same thread that owns the Tk root), but it blocks until the
         # window is closed.  We schedule it as an idle callback so the GUI
         # can repaint first.
-        self.after(50, lambda: self._show_plotter(plotter))
+        self.after(50, lambda: self._show_plotter(plotter, photo_mode))
 
     def _finalize_render_error(self, exc: BaseException) -> None:
         self._render_btn.configure(state="normal", text="Render plot")
         self._status.configure(text=self._status_text())
         messagebox.showerror("Render failed", str(exc))
 
-    def _show_plotter(self, plotter: UnifiedPlotter) -> None:
+    def _show_plotter(self, plotter: UnifiedPlotter, photo_mode: bool) -> None:
         try:
-            plotter.show(show_axes=True, show_bounds=True, show_legend=True)
+            plotter.show(
+                show_axes=True,
+                show_bounds=True,
+                show_legend=True,
+                photo_mode=photo_mode,
+                on_capture=self._open_photo_editor,
+            )
         except Exception as exc:                       # noqa: BLE001
             log.exception("PyVista show() failed")
             messagebox.showerror("Render failed", str(exc))
         finally:
             self._status.configure(text=self._status_text())
+
+    def _open_photo_editor(self, image) -> None:
+        """Show the screenshot label editor (called from the 3-D window).
+
+        ``plotter.show()`` blocks the main thread inside VTK's interactor, so
+        we run the editor modally via ``wait_window`` — Tk pumps its own event
+        loop reentrantly while the 3-D window stays paused in the background.
+        """
+        from omniviz.gui.photo import PhotoEditor
+
+        try:
+            editor = PhotoEditor(self, image=image, initial_dir=self.data_dir)
+            self.wait_window(editor)
+        except Exception:                              # noqa: BLE001
+            log.exception("Photo editor failed")
 
     # ------------------------------------------------------------ appearance
 
