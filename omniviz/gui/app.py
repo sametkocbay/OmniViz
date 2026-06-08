@@ -236,8 +236,10 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             photo,
-            text="In the 3-D window: click the 📷 (top-left) or press "
-                 "[c] to capture · [a] axes · [g] grid",
+            text="In the 3-D window: click 📷 (top-left) or [c] to capture · "
+                 "[a] axes · [g] grid\n"
+                 "Views: click the axis gizmo, or [x] [y] [z] · [i] isometric · "
+                 "[f] flip",
             text_color=("gray35", "gray70"),
             wraplength=300, justify="left", font=ctk.CTkFont(size=11),
         ).grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(0, PAD_Y))

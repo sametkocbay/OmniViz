@@ -123,6 +123,7 @@ class UnifiedPlotter:
         self._camera_rep: Any = None
         self._camera_img: Any = None
         self._help_actor: Any = None
+        self._orientation_widget: Any = None
 
     # -- public API ---------------------------------------------------------- #
 
@@ -395,6 +396,7 @@ class UnifiedPlotter:
             )
 
         self._install_photo_tools(on_capture, capture_scale)
+        self._install_view_tools()
         self._plotter.show()
 
     # -- photo mode / screenshots ------------------------------------------- #
@@ -427,6 +429,14 @@ class UnifiedPlotter:
             except Exception:                                    # noqa: BLE001
                 help_vis = None
 
+        orient_on = None
+        if self._orientation_widget is not None:
+            try:
+                orient_on = bool(self._orientation_widget.GetEnabled())
+                self._orientation_widget.EnabledOff()
+            except Exception:                                    # noqa: BLE001
+                orient_on = None
+
         self._plotter.render()
         try:
             arr = self._plotter.screenshot(return_img=True, scale=scale)
@@ -441,6 +451,11 @@ class UnifiedPlotter:
             if self._help_actor is not None and help_vis is not None:
                 try:
                     self._help_actor.SetVisibility(help_vis)
+                except Exception:                                # noqa: BLE001
+                    pass
+            if self._orientation_widget is not None and orient_on:
+                try:
+                    self._orientation_widget.EnabledOn()
                 except Exception:                                # noqa: BLE001
                     pass
             self._plotter.render()
@@ -491,6 +506,40 @@ class UnifiedPlotter:
         except Exception:                                        # noqa: BLE001
             log.debug("Bounds toggle failed", exc_info=True)
 
+    def _set_view(self, name: str) -> None:
+        """Snap the camera to a canonical orientation."""
+        try:
+            if name == "x":          # look down +X (shows the Y-Z plane)
+                self._plotter.view_yz()
+            elif name == "y":        # look down +Y (shows the X-Z plane)
+                self._plotter.view_xz()
+            elif name == "z":        # look down +Z (shows the X-Y plane)
+                self._plotter.view_xy()
+            elif name == "iso":
+                self._plotter.view_isometric()
+            elif name == "flip":     # spin 180° to view from the far side
+                self._plotter.camera.Azimuth(180)
+                self._plotter.reset_camera_clipping_range()
+            self._plotter.render()
+        except Exception:                                        # noqa: BLE001
+            log.debug("Set view '%s' failed", name, exc_info=True)
+
+    def _install_view_tools(self) -> None:
+        """Bind view hot-keys and add the clickable axis orientation gizmo."""
+        for key, view in (("x", "x"), ("y", "y"), ("z", "z"),
+                          ("i", "iso"), ("f", "flip")):
+            try:
+                self._plotter.add_key_event(key, lambda v=view: self._set_view(v))
+            except Exception:                                    # noqa: BLE001
+                log.debug("Could not bind view key '%s'", key, exc_info=True)
+
+        # Interactive axis gizmo: click an arrow to snap to that axis / flip.
+        try:
+            self._orientation_widget = self._plotter.add_camera_orientation_widget()
+        except Exception:                                        # noqa: BLE001
+            self._orientation_widget = None
+            log.debug("Camera orientation widget unavailable", exc_info=True)
+
     def _install_photo_tools(
         self,
         on_capture: Callable[[PILImage.Image], None] | None,
@@ -510,7 +559,8 @@ class UnifiedPlotter:
         # Faint key hint, hidden automatically while a shot is taken.
         try:
             self._help_actor = self._plotter.add_text(
-                "[c] photo   [a] axes   [g] grid",
+                "[c] photo  [a] axes  [g] grid   "
+                "view: [x][y][z] axis  [i] iso  [f] flip",
                 position="lower_right",
                 font_size=7,
                 color="gray",
