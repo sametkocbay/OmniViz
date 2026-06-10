@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 # Boundary reconstruction (Hermite poloidal × Fourier toroidal)
 # --------------------------------------------------------------------------- #
 
+
 def _hermite_basis(s: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     s2 = s * s
     s3 = s2 * s
@@ -93,9 +94,9 @@ def reconstruct_boundary_surface(
 # --------------------------------------------------------------------------- #
 
 _AXIS_NORMALS = {
-    "x":  (1.0, 0.0, 0.0),
-    "y":  (0.0, 1.0, 0.0),
-    "z":  (0.0, 0.0, 1.0),
+    "x": (1.0, 0.0, 0.0),
+    "y": (0.0, 1.0, 0.0),
+    "z": (0.0, 0.0, 1.0),
     "-x": (-1.0, 0.0, 0.0),
     "-y": (0.0, -1.0, 0.0),
     "-z": (0.0, 0.0, -1.0),
@@ -105,13 +106,24 @@ _AXIS_NORMALS = {
 class UnifiedPlotter:
     """Compose multiple data sources into one PyVista window."""
 
-    def __init__(self, background: str = "white", title: str | None = None) -> None:
-        self._plotter = pv.Plotter()
+    def __init__(
+        self,
+        background: str = "white",
+        title: str | None = None,
+        plotter: Any | None = None,
+    ) -> None:
+        # ``plotter`` may be an externally supplied embedded plotter
+        # (a ``pyvistaqt.QtInteractor`` or a ``pv.Plotter``). We duck-type it so
+        # the core stays importable without Qt installed.
+        self._plotter = plotter if plotter is not None else pv.Plotter()
         self._plotter.set_background(background)
         self._title = title
         self._has_content = False
         self._labels: list[str] = []
         self._clip: dict[str, Any] | None = None
+
+        #: maps a stable item id -> list of actor handles it produced
+        self._actors: dict[str, list] = {}
 
         # -- photo-mode / screenshot state
         self._axes_on = False
@@ -156,6 +168,7 @@ class UnifiedPlotter:
         sample_frac: float = 1.0,
         label: str | None = None,
         render_as_spheres: bool = True,
+        item_id: str | None = None,
     ) -> UnifiedPlotter:
         points = self._coerce_points(source, sample_frac)
         if points.size == 0:
@@ -170,7 +183,7 @@ class UnifiedPlotter:
             np.round(points.max(axis=0), 3).tolist(),
         )
 
-        self._plotter.add_points(
+        actor = self._plotter.add_points(
             pv.PolyData(points),
             color=color,
             point_size=point_size,
@@ -178,7 +191,7 @@ class UnifiedPlotter:
             render_points_as_spheres=render_as_spheres,
             label=label,
         )
-        return self._mark(label)
+        return self._mark(label, item_id, actor)
 
     def add_boundary(
         self,
@@ -192,6 +205,7 @@ class UnifiedPlotter:
         n_phi: int = 60,
         n_s: int = 10,
         label: str | None = None,
+        item_id: str | None = None,
     ) -> UnifiedPlotter:
         data = oio.read_boundary(path)
         if data is None:
@@ -202,7 +216,7 @@ class UnifiedPlotter:
         multi = pv.MultiBlock([pv.StructuredGrid(x, y, z) for (x, y, z) in patches])
         mesh = self._maybe_clip(multi.combine() if self._clip else multi)
 
-        self._plotter.add_mesh(
+        actor = self._plotter.add_mesh(
             mesh,
             color=color,
             show_edges=show_edges,
@@ -216,7 +230,7 @@ class UnifiedPlotter:
 
         if self._title is None:
             self._title = f"JOREK boundary  (harmonics {data.n_harm} · period {data.n_period})"
-        return self._mark(label)
+        return self._mark(label, item_id, actor)
 
     def add_hex_mesh(
         self,
@@ -227,6 +241,7 @@ class UnifiedPlotter:
         opacity: float = 1.0,
         show_edges: bool = True,
         label: str | None = None,
+        item_id: str | None = None,
     ) -> UnifiedPlotter:
         df = df_nodes.sort_values("node_id")
         points = df[["x", "y", "z"]].to_numpy()
@@ -249,14 +264,49 @@ class UnifiedPlotter:
         grid = pv.UnstructuredGrid(np.hstack(cells), cell_types, points)
         log.info("Hex mesh: %d elements, %d nodes", len(elements_hex), len(df_nodes))
 
-        self._plotter.add_mesh(
+        actor = self._plotter.add_mesh(
             self._maybe_clip(grid),
             color=color,
             opacity=opacity,
             show_edges=show_edges,
             label=label,
         )
-        return self._mark(label)
+        return self._mark(label, item_id, actor)
+
+    def add_unstructured(
+        self,
+        grid: pv.UnstructuredGrid,
+        *,
+        color: str | None = None,
+        opacity: float = 1.0,
+        show_edges: bool = True,
+        edge_color: str = "black",
+        scalars: str | None = None,
+        colormap: str | None = None,
+        show_scalar_bar: bool = False,
+        label: str | None = None,
+        item_id: str | None = None,
+    ) -> UnifiedPlotter:
+        """Add a pre-built :class:`pyvista.UnstructuredGrid` to the scene.
+
+        Generic entry point reused by the CARIDDI and JOREK HDF5 items.
+        """
+        kwargs: dict[str, Any] = {
+            "opacity": opacity,
+            "show_edges": show_edges,
+            "edge_color": edge_color,
+            "label": label,
+        }
+        if scalars is not None:
+            kwargs["scalars"] = scalars
+            kwargs["cmap"] = colormap or "viridis"
+            kwargs["show_scalar_bar"] = show_scalar_bar
+        else:
+            kwargs["color"] = color or "lightgray"
+
+        actor = self._plotter.add_mesh(self._maybe_clip(grid), **kwargs)
+        log.info("Unstructured grid: %d points, %d cells", grid.n_points, grid.n_cells)
+        return self._mark(label, item_id, actor)
 
     def add_vtk_mesh(
         self,
@@ -266,17 +316,18 @@ class UnifiedPlotter:
         opacity: float = 1.0,
         show_edges: bool = True,
         label: str | None = None,
+        item_id: str | None = None,
     ) -> UnifiedPlotter:
         mesh = pv.read(str(path))
         log.info("VTK mesh: %d points, %d cells", mesh.n_points, mesh.n_cells)
-        self._plotter.add_mesh(
+        actor = self._plotter.add_mesh(
             self._maybe_clip(mesh),
             color=color,
             opacity=opacity,
             show_edges=show_edges,
             label=label,
         )
-        return self._mark(label)
+        return self._mark(label, item_id, actor)
 
     def add_wire(
         self,
@@ -288,6 +339,7 @@ class UnifiedPlotter:
         tube_radius: float | None = None,
         n_phi: int = 200,
         label: str | None = None,
+        item_id: str | None = None,
     ) -> UnifiedPlotter:
         """Add a tilted circular current filament loop."""
         alfa = np.deg2rad(alfa_wire_deg)
@@ -301,19 +353,20 @@ class UnifiedPlotter:
         z_rot = -x_local * np.sin(alfa) + z0
 
         # Close the loop for a clean spline tube.
-        points = np.column_stack([
-            np.append(x_rot, x_rot[0]),
-            np.append(y_rot, y_rot[0]),
-            np.append(z_rot, z_rot[0]),
-        ])
+        points = np.column_stack(
+            [
+                np.append(x_rot, x_rot[0]),
+                np.append(y_rot, y_rot[0]),
+                np.append(z_rot, z_rot[0]),
+            ]
+        )
 
         radius = tube_radius if (tube_radius and tube_radius > 0) else r0 * 0.02
         tube = pv.Spline(points, n_phi * 4).tube(radius=radius)
-        log.info("Wire: r0=%.4f z0=%.4f alfa=%.3f° tube_r=%.4f",
-                 r0, z0, alfa_wire_deg, radius)
+        log.info("Wire: r0=%.4f z0=%.4f alfa=%.3f° tube_r=%.4f", r0, z0, alfa_wire_deg, radius)
 
-        self._plotter.add_mesh(tube, color=color, label=label)
-        return self._mark(label)
+        actor = self._plotter.add_mesh(tube, color=color, label=label)
+        return self._mark(label, item_id, actor)
 
     def add_vector_field(
         self,
@@ -325,6 +378,7 @@ class UnifiedPlotter:
         color_by_magnitude: bool = False,
         sample_frac: float = 1.0,
         label: str | None = None,
+        item_id: str | None = None,
     ) -> UnifiedPlotter:
         df = oio.read_vector_field(source) if isinstance(source, (str, Path)) else source.copy()
 
@@ -343,9 +397,13 @@ class UnifiedPlotter:
         points = df[["x", "y", "z"]].to_numpy()
         vectors = df[["Bx", "By", "Bz"]].to_numpy() * scale
         magnitudes = np.linalg.norm(vectors, axis=1)
-        log.info("Vector field%s: %d arrows, |B| in [%.4g, %.4g]",
-                 f" ({label})" if label else "", len(points),
-                 magnitudes.min(), magnitudes.max())
+        log.info(
+            "Vector field%s: %d arrows, |B| in [%.4g, %.4g]",
+            f" ({label})" if label else "",
+            len(points),
+            magnitudes.min(),
+            magnitudes.max(),
+        )
 
         cloud = pv.PolyData(points)
         cloud["vectors"] = vectors
@@ -353,11 +411,12 @@ class UnifiedPlotter:
         glyphs = cloud.glyph(orient="vectors", scale="magnitude", factor=1.0)
 
         if color_by_magnitude:
-            self._plotter.add_mesh(glyphs, scalars="magnitude",
-                                   cmap=colormap or "plasma", label=label)
+            actor = self._plotter.add_mesh(
+                glyphs, scalars="magnitude", cmap=colormap or "plasma", label=label
+            )
         else:
-            self._plotter.add_mesh(glyphs, color=color, label=label)
-        return self._mark(label)
+            actor = self._plotter.add_mesh(glyphs, color=color, label=label)
+        return self._mark(label, item_id, actor)
 
     def show(
         self,
@@ -401,7 +460,7 @@ class UnifiedPlotter:
 
     # -- photo mode / screenshots ------------------------------------------- #
 
-    def capture_highres(self, scale: int | None = None) -> "PILImage.Image":
+    def capture_highres(self, scale: int | None = None) -> PILImage.Image:
         """Render the current view to a high-resolution PIL image.
 
         The on-screen camera button and key hints are hidden for the shot so
@@ -418,7 +477,7 @@ class UnifiedPlotter:
                 if self._camera_rep is not None:
                     self._camera_rep.VisibilityOff()
                 hidden_widget = True
-            except Exception:                                    # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 pass
 
         help_vis = None
@@ -426,7 +485,7 @@ class UnifiedPlotter:
             try:
                 help_vis = self._help_actor.GetVisibility()
                 self._help_actor.SetVisibility(False)
-            except Exception:                                    # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 help_vis = None
 
         orient_on = None
@@ -434,7 +493,7 @@ class UnifiedPlotter:
             try:
                 orient_on = bool(self._orientation_widget.GetEnabled())
                 self._orientation_widget.EnabledOff()
-            except Exception:                                    # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 orient_on = None
 
         self._plotter.render()
@@ -446,17 +505,17 @@ class UnifiedPlotter:
                     if self._camera_rep is not None:
                         self._camera_rep.VisibilityOn()
                     self._camera_widget.On()
-                except Exception:                                # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     pass
             if self._help_actor is not None and help_vis is not None:
                 try:
                     self._help_actor.SetVisibility(help_vis)
-                except Exception:                                # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     pass
             if self._orientation_widget is not None and orient_on:
                 try:
                     self._orientation_widget.EnabledOn()
-                except Exception:                                # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     pass
             self._plotter.render()
 
@@ -469,7 +528,7 @@ class UnifiedPlotter:
         self._capture_busy = True
         try:
             img = self.capture_highres()
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("Screenshot capture failed")
             return
         finally:
@@ -478,7 +537,7 @@ class UnifiedPlotter:
         if self._on_capture is not None:
             try:
                 self._on_capture(img)
-            except Exception:                                    # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 log.exception("Screenshot handler failed")
         else:
             from datetime import datetime
@@ -492,7 +551,7 @@ class UnifiedPlotter:
         try:
             self._plotter.show_axes() if self._axes_on else self._plotter.hide_axes()
             self._plotter.render()
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.debug("Axes toggle failed", exc_info=True)
 
     def _toggle_bounds(self) -> None:
@@ -503,40 +562,39 @@ class UnifiedPlotter:
             else:
                 self._plotter.remove_bounds_axes()
             self._plotter.render()
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.debug("Bounds toggle failed", exc_info=True)
 
     def _set_view(self, name: str) -> None:
         """Snap the camera to a canonical orientation."""
         try:
-            if name == "x":          # look down +X (shows the Y-Z plane)
+            if name == "x":  # look down +X (shows the Y-Z plane)
                 self._plotter.view_yz()
-            elif name == "y":        # look down +Y (shows the X-Z plane)
+            elif name == "y":  # look down +Y (shows the X-Z plane)
                 self._plotter.view_xz()
-            elif name == "z":        # look down +Z (shows the X-Y plane)
+            elif name == "z":  # look down +Z (shows the X-Y plane)
                 self._plotter.view_xy()
             elif name == "iso":
                 self._plotter.view_isometric()
-            elif name == "flip":     # spin 180° to view from the far side
+            elif name == "flip":  # spin 180° to view from the far side
                 self._plotter.camera.Azimuth(180)
                 self._plotter.reset_camera_clipping_range()
             self._plotter.render()
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.debug("Set view '%s' failed", name, exc_info=True)
 
     def _install_view_tools(self) -> None:
         """Bind view hot-keys and add the clickable axis orientation gizmo."""
-        for key, view in (("x", "x"), ("y", "y"), ("z", "z"),
-                          ("i", "iso"), ("f", "flip")):
+        for key, view in (("x", "x"), ("y", "y"), ("z", "z"), ("i", "iso"), ("f", "flip")):
             try:
                 self._plotter.add_key_event(key, lambda v=view: self._set_view(v))
-            except Exception:                                    # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 log.debug("Could not bind view key '%s'", key, exc_info=True)
 
         # Interactive axis gizmo: click an arrow to snap to that axis / flip.
         try:
             self._orientation_widget = self._plotter.add_camera_orientation_widget()
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             self._orientation_widget = None
             log.debug("Camera orientation widget unavailable", exc_info=True)
 
@@ -553,19 +611,18 @@ class UnifiedPlotter:
             self._plotter.add_key_event("c", self._do_capture)
             self._plotter.add_key_event("a", self._toggle_axes)
             self._plotter.add_key_event("g", self._toggle_bounds)
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.debug("Could not bind photo hot-keys", exc_info=True)
 
         # Faint key hint, hidden automatically while a shot is taken.
         try:
             self._help_actor = self._plotter.add_text(
-                "[c] photo  [a] axes  [g] grid   "
-                "view: [x][y][z] axis  [i] iso  [f] flip",
+                "[c] photo  [a] axes  [g] grid   view: [x][y][z] axis  [i] iso  [f] flip",
                 position="lower_right",
                 font_size=7,
                 color="gray",
             )
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             self._help_actor = None
 
         self._make_camera_button()
@@ -590,9 +647,7 @@ class UnifiedPlotter:
 
             def _place() -> None:
                 w, h = self._plotter.window_size
-                rep.PlaceWidget(
-                    [margin, margin + size, h - margin - size, h - margin, 0.0, 0.0]
-                )
+                rep.PlaceWidget([margin, margin + size, h - margin - size, h - margin, 0.0, 0.0])
 
             _place()
 
@@ -607,7 +662,7 @@ class UnifiedPlotter:
 
             self._camera_widget = widget
             self._camera_rep = rep
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.debug("Camera button unavailable; use the [c] hot-key", exc_info=True)
             self._camera_widget = None
 
@@ -623,17 +678,11 @@ class UnifiedPlotter:
         white = (255, 255, 255, 255)
 
         d.rounded_rectangle([1, 1, s - 2, s - 2], radius=s * 0.18, fill=accent)
-        d.rounded_rectangle(
-            [s * 0.36, s * 0.24, s * 0.58, s * 0.36], radius=s * 0.03, fill=white
-        )
-        d.rounded_rectangle(
-            [s * 0.14, s * 0.34, s * 0.86, s * 0.76], radius=s * 0.08, fill=white
-        )
+        d.rounded_rectangle([s * 0.36, s * 0.24, s * 0.58, s * 0.36], radius=s * 0.03, fill=white)
+        d.rounded_rectangle([s * 0.14, s * 0.34, s * 0.86, s * 0.76], radius=s * 0.08, fill=white)
         cx, cy, r = s * 0.5, s * 0.55, s * 0.135
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=accent)
-        d.ellipse(
-            [cx - r * 0.5, cy - r * 0.5, cx + r * 0.5, cy + r * 0.5], fill=white
-        )
+        d.ellipse([cx - r * 0.5, cy - r * 0.5, cx + r * 0.5, cy + r * 0.5], fill=white)
         return np.asarray(img, dtype=np.uint8)
 
     @staticmethod
@@ -646,20 +695,74 @@ class UnifiedPlotter:
         flipped = np.ascontiguousarray(arr[::-1])
         image = vtk.vtkImageData()
         image.SetDimensions(w, h, 1)
-        vtk_arr = numpy_to_vtk(
-            flipped.reshape(-1, c), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
-        )
+        vtk_arr = numpy_to_vtk(flipped.reshape(-1, c), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
         vtk_arr.SetNumberOfComponents(c)
         image.GetPointData().SetScalars(vtk_arr)
         return image
 
     # -- internal helpers ---------------------------------------------------- #
 
-    def _mark(self, label: str | None) -> UnifiedPlotter:
+    def _mark(
+        self,
+        label: str | None,
+        item_id: str | None = None,
+        actor: Any | None = None,
+    ) -> UnifiedPlotter:
         self._has_content = True
         if label:
             self._labels.append(label)
+        if item_id is not None and actor is not None:
+            self._actors.setdefault(item_id, []).append(actor)
         return self
+
+    # -- live scene mutation ------------------------------------------------- #
+
+    def remove_item(self, item_id: str) -> None:
+        """Remove every actor associated with ``item_id`` and re-render."""
+        handles = self._actors.pop(item_id, [])
+        for handle in handles:
+            try:
+                self._plotter.remove_actor(handle)
+            except Exception:  # noqa: BLE001
+                log.debug("remove_actor failed for item '%s'", item_id, exc_info=True)
+        self.render()
+
+    def update_item(
+        self,
+        item_id: str,
+        *,
+        color: Any | None = None,
+        opacity: float | None = None,
+        visibility: bool | None = None,
+    ) -> None:
+        """Mutate stored actor properties for ``item_id`` in place."""
+        handles = self._actors.get(item_id, [])
+        for handle in handles:
+            try:
+                prop = getattr(handle, "prop", None) or handle.GetProperty()
+                if color is not None:
+                    prop.color = color
+                if opacity is not None:
+                    prop.opacity = opacity
+                if visibility is not None:
+                    handle.SetVisibility(bool(visibility))
+            except Exception:  # noqa: BLE001
+                log.debug("update_item failed for item '%s'", item_id, exc_info=True)
+        self.render()
+
+    def clear_items(self) -> None:
+        """Remove every tracked actor from the scene."""
+        for item_id in list(self._actors.keys()):
+            self.remove_item(item_id)
+
+    def render(self) -> None:
+        """Re-render the scene if the underlying plotter supports it."""
+        render = getattr(self._plotter, "render", None)
+        if callable(render):
+            try:
+                render()
+            except Exception:  # noqa: BLE001
+                log.debug("render() failed", exc_info=True)
 
     def _maybe_clip(self, mesh: pv.DataSet) -> pv.DataSet:
         if not self._clip:
@@ -671,7 +774,7 @@ class UnifiedPlotter:
                 origin=origin,
                 invert=self._clip["invert"],
             )
-        except Exception as exc:                                  # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.warning("Clip failed (%s); rendering unclipped mesh", exc)
             return mesh
 

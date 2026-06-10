@@ -26,12 +26,19 @@ dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
     "pyvista>=0.43",
+    "pyside6",
+    "pyvistaqt",
+    "qtpy",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.5",
     "pytest>=8.0",
+]
+jorek = [
+    "h5py>=3.10",
 ]
 
 [project.scripts]
