@@ -493,7 +493,10 @@ def read_jorek_restart(
     # Poloidal interp -> vals[var, harmonic, element, s, t], then apply HZ.
     # ------------------------------------------------------------------ #
     hz = _jorek_toroidal_basis(n_tor, n_period, phis)
-    vals_pol = np.einsum("lihjk,ijk,ijmn->lhkmn", values[var_idx][:, :, :, vertex - 1], size, bf)
+    # ``values`` is element-local: (var, order, harmonic, vertex_max, element);
+    # contract the Bernstein order/vertex axes against ``size`` and ``bf``
+    # directly (no node gather — that produced a 6-D operand and crashed).
+    vals_pol = np.einsum("lihjk,ijk,ijmn->lhkmn", values[var_idx], size, bf)
     vals_3d = np.einsum("lhkmn,hp->lpkmn", vals_pol, hz)  # [var, plane, elem, s, t]
 
     for vi, gi in enumerate(var_idx):

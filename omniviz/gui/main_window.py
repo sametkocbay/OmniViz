@@ -22,7 +22,7 @@ from pathlib import Path
 # pyvistaqt/qtpy must see the chosen Qt binding before they import it.
 os.environ.setdefault("QT_API", "pyside6")
 
-from qtpy.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal  # noqa: E402
+from qtpy.QtCore import QSize, Qt  # noqa: E402
 from qtpy.QtGui import (  # noqa: E402
     QAction,
     QActionGroup,
@@ -87,35 +87,6 @@ def _project_root() -> Path:
 # --------------------------------------------------------------------------- #
 # Background worker — keep heavy item.apply() off the UI thread
 # --------------------------------------------------------------------------- #
-
-
-class _ApplySignals(QObject):
-    done = Signal(object)  # ViewItem
-    failed = Signal(object, object)  # ViewItem, Exception
-
-
-class _ApplyWorker(QRunnable):
-    """Run ``item.apply(plotter, data_dir)`` off the main thread.
-
-    PyVista/VTK actor mutation is not thread-safe, so this is used only for the
-    expensive parse + mesh-build that ``apply()`` performs internally; the
-    actual ``render()`` is scheduled back on the main thread via the signal.
-    """
-
-    def __init__(self, item: ViewItem, plotter: UnifiedPlotter, data_dir: Path) -> None:
-        super().__init__()
-        self.item = item
-        self.plotter = plotter
-        self.data_dir = data_dir
-        self.signals = _ApplySignals()
-
-    def run(self) -> None:  # noqa: D401 - QRunnable entry point
-        try:
-            self.item.apply(self.plotter, self.data_dir)
-            self.signals.done.emit(self.item)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Applying item '%s' failed", self.item.label)
-            self.signals.failed.emit(self.item, exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -326,8 +297,6 @@ class MainWindow(QMainWindow):
         self._items: list[ViewItem] = []
         self._categories = categorize_files_qt(self.data_dir)
         self._last_import_dir = self.data_dir if self.data_dir.exists() else Path.home()
-        self._pool = QThreadPool.globalInstance()
-        self._workers: list[_ApplyWorker] = []
 
         if LOGO_PATH.is_file():
             self.setWindowIcon(QIcon(str(LOGO_PATH)))
@@ -623,23 +592,33 @@ class MainWindow(QMainWindow):
             self._render_profile(item)
             self._log(f"Added profile {item.label}")
         else:
-            self._apply_item_async(item)
+            self._apply_item(item)
         self._update_status()
 
-    def _apply_item_async(self, item: ViewItem) -> None:
-        worker = _ApplyWorker(item, self.plotter, self.data_dir)
-        worker.signals.done.connect(self._on_apply_done)
-        worker.signals.failed.connect(self._on_apply_failed)
-        self._workers.append(worker)
+    def _apply_item(self, item: ViewItem) -> None:
+        """Build and add an item's actor.
+
+        ``item.apply()`` creates VTK actors on the live ``QtInteractor``; VTK is
+        not thread-safe, so this runs synchronously on the Qt main thread. Heavy
+        loads briefly block the UI — splitting parse (worker) from add (main
+        thread) is a future optimization that needs ``apply()`` reworked.
+        """
         self._log(f"Building {item.kind}: {item.label}…")
-        self._pool.start(worker)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            item.apply(self.plotter, self.data_dir)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Applying item '%s' failed", item.label)
+            self._on_apply_failed(item, exc)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._on_apply_done(item)
 
     def _on_apply_done(self, item: ViewItem) -> None:
-        # render() touches VTK; this slot runs on the main thread (queued signal).
         self.plotter.render()
         self._apply_row_state(item)
         self._log(f"Added {item.kind}: {item.label}")
-        self._reap_worker(item)
 
     def _on_apply_failed(self, item: ViewItem, exc: Exception) -> None:
         QMessageBox.critical(self, "Add failed", f"Could not add {item.label}:\n{exc}")
@@ -648,10 +627,6 @@ class MainWindow(QMainWindow):
             self._items.remove(item)
         self._remove_tree_row(item)
         self._update_status()
-        self._reap_worker(item)
-
-    def _reap_worker(self, item: ViewItem) -> None:
-        self._workers = [w for w in self._workers if w.item is not item]
 
     def _clear_items(self) -> None:
         self.plotter.clear_items()
@@ -710,13 +685,20 @@ class MainWindow(QMainWindow):
         self._apply_row_state(item)
 
     def _apply_row_state(self, item: ViewItem) -> None:
-        """Push the row's control state into the live actor."""
+        """Push the row's control state into the live actor.
+
+        Scalar-coloured items (vector-by-magnitude, CARIDDI J, JOREK HDF5) are
+        driven by a colormap, so we must NOT force a flat ``prop.color`` onto
+        them — doing so would collapse the colormap to a single tint. Their
+        colour is managed via the colormap control (``_on_scalar_changed``).
+        """
         _node, row = self._find_tree_node(item)
         if row is None:
             return
+        push_color = item.kind not in _SCALAR_KINDS
         self.plotter.update_item(
             item.id,
-            color=row.color_rgb,
+            color=row.color_rgb if push_color else None,
             opacity=row.opacity,
             visibility=row.visible,
         )

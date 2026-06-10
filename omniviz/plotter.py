@@ -301,6 +301,10 @@ class UnifiedPlotter:
             kwargs["scalars"] = scalars
             kwargs["cmap"] = colormap or "viridis"
             kwargs["show_scalar_bar"] = show_scalar_bar
+            if show_scalar_bar and label:
+                # Title the bar by the item label so the GUI can show/hide it
+                # later (PyVista keys scalar bars by title).
+                kwargs["scalar_bar_args"] = {"title": label}
         else:
             kwargs["color"] = color or "lightgray"
 
@@ -411,8 +415,13 @@ class UnifiedPlotter:
         glyphs = cloud.glyph(orient="vectors", scale="magnitude", factor=1.0)
 
         if color_by_magnitude:
+            bar_args = {"title": label} if label else None
             actor = self._plotter.add_mesh(
-                glyphs, scalars="magnitude", cmap=colormap or "plasma", label=label
+                glyphs,
+                scalars="magnitude",
+                cmap=colormap or "plasma",
+                label=label,
+                scalar_bar_args=bar_args,
             )
         else:
             actor = self._plotter.add_mesh(glyphs, color=color, label=label)

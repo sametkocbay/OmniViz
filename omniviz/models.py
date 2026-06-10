@@ -342,9 +342,12 @@ class Hdf5RestartItem(ViewItem):
             n_plane=self.n_plane,
             variables=[self.scalar],
         )
+        # read_jorek_restart falls back to psi when the requested scalar name is
+        # not in the file; colour by whatever it actually attached/activated.
+        active = grid.active_scalars_name or self.scalar
         plotter.add_unstructured(
             grid,
-            scalars=self.scalar,
+            scalars=active,
             colormap=self.colormap,
             show_scalar_bar=True,
             show_edges=False,
