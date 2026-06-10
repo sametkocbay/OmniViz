@@ -5,30 +5,35 @@
 <h1 align="center">OmniViz</h1>
 
 > A modern Python GUI for visualizing stellarator and fusion-reactor
-> geometries: JOREK boundary surfaces, Patran/VTK meshes, XYZ point clouds,
-> 6-column vector fields, and current-filament wire loops — combined into a
-> single interactive PyVista plot.
+> geometries: JOREK boundary surfaces and HDF5 restarts, CARIDDI meshes and
+> current density, Patran/VTK/VTU meshes, XYZ point clouds, 6-column vector
+> fields, profiles, and current-filament wire loops — all in one **single,
+> live, interactive** PyVista window.
 
 OmniViz wraps a small typed data-loading layer around
 [PyVista](https://pyvista.org/) and exposes it through a
-[CustomTkinter](https://customtkinter.tomschimansky.com/) GUI: pick what to
-draw, queue it up, optionally enable a clip plane, and render.
+[PySide6](https://doc.qt.io/qtforpython-6/) GUI with an **embedded** 3D view
+([pyvistaqt](https://github.com/pyvista/pyvistaqt)): pick what to draw and it
+appears immediately in the one persistent scene; toggle visibility, opacity,
+color, colormap, and a clip plane live; switch views; export high-res figures.
 
 ---
 
 ## Features
 
-- **Multi-source plotting.** Queue any combination of point clouds,
-  JOREK boundary surfaces (Hermite × Fourier reconstruction), Patran
-  neutral `.msh` hex meshes, generic `.vtk` meshes, vector fields, and
-  tilted circular current loops.
-- **Modern GUI.** CustomTkinter, dark/light/system theme, tabbed input
-  panels with a live file filter, queue card view, and a one-click
-  clip-plane toggle.
+- **Single live window.** One embedded 3D view; adding/removing an item
+  updates the scene immediately — no second window, no per-render rebuild.
+- **Multi-source plotting.** Combine point clouds, JOREK boundary surfaces
+  (Hermite × Fourier reconstruction), JOREK HDF5 restarts, CARIDDI meshes
+  (hex/tetra/wedge) and current density, Patran `.msh`, generic `.vtk`/`.vtu`
+  meshes, 6-column vector fields, 2D profiles, and tilted current loops.
+- **Live scene control.** Per-item visibility, opacity, color, colormap and
+  scalar-bar toggles; interactive clip plane; view presets (X/Y/Z/iso/flip);
+  high-res screenshot export — all from the one window.
+- **Modern GUI.** PySide6 + pyvistaqt, cohesive dark/light theme, tabbed input
+  panels with a live file filter, and a scene-tree dock.
 - **Robust parsers.** Handles Fortran-style truncated exponents
   (`1.234-309` → `1.234E-309`) found in many fusion codes.
-- **Reproducible installs.** Either `uv` (`pyproject.toml` + `uv.lock`)
-  or `conda` (`environment.yml`).
 - **Scripting-friendly.** The `UnifiedPlotter` chain API can be used
   directly from notebooks/scripts without the GUI.
 
@@ -50,12 +55,17 @@ cd OmniViz
 # Create an isolated venv and install from the lock file
 uv sync --frozen
 
+# Optional: add the JOREK HDF5 restart reader (pulls in h5py)
+uv sync --extra jorek
+
 # Run the GUI
 uv run omniviz
 ```
 
 `uv sync` reads `pyproject.toml` + `uv.lock` and produces a fully
-reproducible `.venv/` in the project root.
+reproducible `.venv/` in the project root. The GUI stack (PySide6 +
+pyvistaqt) installs by default; the JOREK HDF5 reader is the optional
+`jorek` extra.
 
 ### Option B — `conda` / `mamba`
 
@@ -92,19 +102,23 @@ python -m omniviz   # equivalent module form
 
 The window has:
 
-1. **Left pane** — tabbed input forms (Point Cloud, Boundary, VTK,
-   Patran, Vector Field, Wire). Each tab shows a filterable list of
-   files from `data/`, plus the rendering options for that type.
-2. **Right pane** — the *render queue* (cards showing each item you
-   added), an optional **clip plane**, and the big **Render plot**
+1. **Left dock** — tabbed input forms (Point Cloud, Boundary, VTK/VTU,
+   Patran, Vector Field, CARIDDI Mesh, CARIDDI Current Density, JOREK
+   Restart, Profile, Wire). Each tab shows a filterable list of files
+   from `data/`, plus the options for that type, and an **Add to scene**
    button.
-3. **Header** — **Import file…** (browse anywhere on disk → copy into
-   `data/` with a live progress bar) and the appearance toggle
-   (Dark / Light / System).
+2. **Center** — the **embedded 3D view**. Items appear here the moment
+   you add them.
+3. **Right dock** — the **scene tree**: one row per item with live
+   visibility, opacity, color, and (for scalar-colored items) colormap
+   and scalar-bar controls, plus remove (`✕`).
+4. **Toolbar / menus** — view presets (X/Y/Z/iso/flip), axes/grid/
+   background toggles, interactive clip plane, **Import file…**, reload,
+   high-res **screenshot export**, and a Dark/Light theme switch.
 
-Items in the queue can be removed individually (`✕`) or cleared all at
-once. Render hands the queue off to PyVista, which opens a separate
-interactive 3D window.
+Edits in the scene tree update the embedded view live — there is no
+separate render step and no second window. 2D profiles render in their
+own bottom panel.
 
 ### Importing data from elsewhere
 
@@ -141,19 +155,23 @@ from omniviz.plotter import UnifiedPlotter
 
 The GUI auto-categorizes files dropped into `data/`:
 
-| Pattern                          | Treated as     |
-|----------------------------------|----------------|
-| `boundary.txt`                   | JOREK boundary |
-| `*.vtk`                          | VTK mesh       |
-| `*.msh`                          | Patran neutral |
-| `*.dat` / `*.txt` (≥ 6 columns)  | Vector field   |
-| `*.dat` / `*.txt` (≤ 5 columns)  | XYZ point cloud |
+| Pattern                          | Treated as       |
+|----------------------------------|------------------|
+| `boundary.txt`                   | JOREK boundary   |
+| `*.vtk` / `*.vtu`                | VTK / VTU mesh   |
+| `*.msh`                          | Patran neutral   |
+| `*.h5` / `*.hdf5`                | JOREK restart    |
+| `*.dat` / `*.txt` (≥ 6 columns)  | Vector field     |
+| `*.dat` / `*.txt` (≤ 5 columns)  | XYZ point cloud  |
+
+CARIDDI mesh (`x.dat` / `ix.dat` / `ixtype.dat`), current density, and 2-column
+profiles are selected explicitly in their panels from the `.dat` files in `data/`.
 
 You can point the GUI at a different directory via the Python API:
 
 ```python
 from pathlib import Path
-from omniviz.gui.app import run
+from omniviz.gui.main_window import run
 run(data_dir=Path("/scratch/me/run42"))
 ```
 
@@ -164,41 +182,37 @@ run(data_dir=Path("/scratch/me/run42"))
 ```
 OmniViz/
 ├── omniviz/                # the installable package
-│   ├── __init__.py
 │   ├── __main__.py         # `python -m omniviz`
-│   ├── io.py               # parsers (XYZ, vector field, boundary, Patran)
-│   ├── plotter.py          # UnifiedPlotter (PyVista wrapper)
-│   ├── models.py           # ViewItem dataclasses (PointCloudItem, …)
-│   ├── assets/             # bundled static assets
-│   │   └── omniviz_logo.png
+│   ├── io.py               # parsers (XYZ, vector field, boundary, Patran,
+│   │                       #   CARIDDI mesh, profiles, JOREK HDF5)
+│   ├── plotter.py          # UnifiedPlotter — embedded-plotter + actor tracking
+│   ├── models.py           # ViewItem dataclasses (with stable ids)
+│   ├── assets/             # bundled static assets (logo)
 │   └── gui/
-│       ├── app.py          # main window (loads logo as window icon)
-│       ├── panels.py       # one panel per data type
-│       ├── file_dialog.py  # themed file browser
-│       ├── import_dialog.py# copy-with-progress dialog
-│       └── theme.py
+│       ├── main_window.py  # PySide6 QMainWindow + embedded QtInteractor
+│       ├── qt_panels.py    # one input panel per data type
+│       ├── qt_style.py     # dark/light QSS theme
+│       ├── qt_icons.py     # toolbar / swatch icons
+│       └── (app.py, panels.py, photo.py, … legacy CustomTkinter, unused)
+├── tests/                  # parser + actor-tracking tests
 ├── data/                   # sample input files
-├── pyproject.toml
-├── uv.lock
-├── environment.yml
-├── run.sh
+├── pyproject.toml          # deps + [jorek] extra
 └── README.md
 ```
 
 ### Design rules followed
 
-- **Typed dataclasses for items.** Each queueable thing is a
-  `ViewItem` subclass with `summary()` + `apply()` — no untyped dicts.
-- **Single source of truth for parsing.** `omniviz.io` is the only
-  place that touches raw text files.
-- **Boundary maths split from rendering.** `reconstruct_boundary_surface()`
-  in `plotter.py` is pure NumPy and reusable outside the GUI.
-- **GUI ↔ logic separation.** Panels only build items; rendering goes
-  through the same `UnifiedPlotter` you would call from a script.
-- **Non-blocking render.** Build-up of the plot runs off the Tk
-  thread; the PyVista window is then shown from the main loop.
-- **Lint config.** `ruff` configured in `pyproject.toml`
-  (`E/F/W/I/UP/B/C4`) — run `uv run ruff check .`.
+- **Typed dataclasses for items.** Each item is a `ViewItem` subclass with a
+  stable `id`, `summary()`, and `apply()` — no untyped dicts.
+- **Single source of truth for parsing.** `omniviz.io` is the only place that
+  touches raw data files.
+- **Boundary maths split from rendering.** `reconstruct_boundary_surface()` in
+  `plotter.py` is pure NumPy and reusable outside the GUI.
+- **GUI ↔ logic separation.** Panels only build items; everything renders
+  through the one shared `UnifiedPlotter` bound to the embedded view.
+- **Live scene, threaded loads.** Queue ops map to `add/remove/update` on the
+  shared plotter; heavy parsing runs off the Qt main thread.
+- **Lint config.** `ruff` in `pyproject.toml` (`E/F/W/I/UP/B/C4`).
 
 ---
 
@@ -208,7 +222,7 @@ OmniViz/
 uv sync --extra dev          # install dev deps (ruff, pytest)
 uv run ruff check .
 uv run ruff format .
-uv run pytest                # (tests live under tests/ — add as needed)
+QT_QPA_PLATFORM=offscreen uv run pytest -q   # tests live under tests/ (headless)
 ```
 
 ---

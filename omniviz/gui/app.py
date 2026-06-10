@@ -83,7 +83,7 @@ class App(ctk.CTk):
                     data=_pil_to_png_bytes(icon),
                 )
             self.iconphoto(True, self._icon_image)
-        except (OSError, tk.TclError) as exc:                  # noqa: BLE001
+        except (OSError, tk.TclError) as exc:  # noqa: BLE001
             log.debug("Could not set window icon: %s", exc)
 
     # ---------------------------------------------------------------- layout
@@ -99,8 +99,7 @@ class App(ctk.CTk):
         self._build_status_bar()
 
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, corner_radius=0, height=64,
-                              fg_color=("gray92", "gray15"))
+        header = ctk.CTkFrame(self, corner_radius=0, height=64, fg_color=("gray92", "gray15"))
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
         header.grid_columnconfigure(2, weight=1)
 
@@ -111,13 +110,18 @@ class App(ctk.CTk):
                 with Image.open(LOGO_PATH) as raw:
                     pil_img = raw.convert("RGBA")
                 self._header_logo = ctk.CTkImage(
-                    light_image=pil_img, dark_image=pil_img, size=(48, 48),
+                    light_image=pil_img,
+                    dark_image=pil_img,
+                    size=(48, 48),
                 )
                 ctk.CTkLabel(header, image=self._header_logo, text="").grid(
-                    row=0, column=0, sticky="w", padx=(PAD_X * 2, 6),
+                    row=0,
+                    column=0,
+                    sticky="w",
+                    padx=(PAD_X * 2, 6),
                     pady=(PAD_Y // 2, PAD_Y // 2),
                 )
-            except OSError as exc:                             # noqa: BLE001
+            except OSError as exc:  # noqa: BLE001
                 log.debug("Could not load header logo: %s", exc)
 
         ctk.CTkLabel(
@@ -163,12 +167,12 @@ class App(ctk.CTk):
         tabs.grid(row=0, column=0, sticky="nsew")
 
         tab_specs = [
-            ("Point Cloud",  PointCloudPanel,  "point_cloud"),
-            ("Boundary",     BoundaryPanel,    "boundary"),
-            ("VTK",          VtkMeshPanel,     "vtk"),
-            ("Patran",       PatranMeshPanel,  "patran"),
+            ("Point Cloud", PointCloudPanel, "point_cloud"),
+            ("Boundary", BoundaryPanel, "boundary"),
+            ("VTK", VtkMeshPanel, "vtk"),
+            ("Patran", PatranMeshPanel, "patran"),
             ("Vector Field", VectorFieldPanel, "vector_field"),
-            ("Wire",         WirePanel,        None),
+            ("Wire", WirePanel, None),
         ]
         for name, panel_cls, key in tab_specs:
             tab = tabs.add(name)
@@ -207,8 +211,9 @@ class App(ctk.CTk):
         actions.grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=4)
         actions.grid_columnconfigure((0, 1), weight=1)
 
-        ctk.CTkButton(actions, text="Clear all",
-                      command=self._clear_items).grid(row=0, column=1, sticky="e", padx=4)
+        ctk.CTkButton(actions, text="Clear all", command=self._clear_items).grid(
+            row=0, column=1, sticky="e", padx=4
+        )
 
         # --- clip plane
         clip = ctk.CTkFrame(pane, corner_radius=CORNER_RADIUS)
@@ -216,11 +221,13 @@ class App(ctk.CTk):
         clip.grid_columnconfigure(1, weight=1)
 
         self._clip_enabled = ctk.CTkSwitch(clip, text="Enable clip plane")
-        self._clip_enabled.grid(row=0, column=0, columnspan=2, sticky="w",
-                                padx=PAD_X, pady=(PAD_Y, 4))
+        self._clip_enabled.grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=PAD_X, pady=(PAD_Y, 4)
+        )
 
-        ctk.CTkLabel(clip, text="Direction").grid(row=1, column=0, sticky="w",
-                                                  padx=PAD_X, pady=(0, PAD_Y))
+        ctk.CTkLabel(clip, text="Direction").grid(
+            row=1, column=0, sticky="w", padx=PAD_X, pady=(0, PAD_Y)
+        )
         self._clip_dir = ctk.CTkOptionMenu(clip, values=list(CLIP_DIRECTIONS))
         self._clip_dir.set("y")
         self._clip_dir.grid(row=1, column=1, sticky="ew", padx=PAD_X, pady=(0, PAD_Y))
@@ -230,18 +237,19 @@ class App(ctk.CTk):
         photo.grid(row=5, column=0, sticky="ew", padx=PAD_X, pady=4)
         photo.grid_columnconfigure(0, weight=1)
 
-        self._photo_mode = ctk.CTkSwitch(
-            photo, text="Photo mode (clean — no axes/grid)")
+        self._photo_mode = ctk.CTkSwitch(photo, text="Photo mode (clean — no axes/grid)")
         self._photo_mode.grid(row=0, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 2))
 
         ctk.CTkLabel(
             photo,
             text="In the 3-D window: click 📷 (top-left) or [c] to capture · "
-                 "[a] axes · [g] grid\n"
-                 "Views: click the axis gizmo, or [x] [y] [z] · [i] isometric · "
-                 "[f] flip",
+            "[a] axes · [g] grid\n"
+            "Views: click the axis gizmo, or [x] [y] [z] · [i] isometric · "
+            "[f] flip",
             text_color=("gray35", "gray70"),
-            wraplength=300, justify="left", font=ctk.CTkFont(size=11),
+            wraplength=300,
+            justify="left",
+            font=ctk.CTkFont(size=11),
         ).grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(0, PAD_Y))
 
         # --- big render button
@@ -256,11 +264,12 @@ class App(ctk.CTk):
 
     def _build_status_bar(self) -> None:
         self._status = ctk.CTkLabel(
-            self, text=self._status_text(),
-            anchor="w", text_color=("gray35", "gray70"),
+            self,
+            text=self._status_text(),
+            anchor="w",
+            text_color=("gray35", "gray70"),
         )
-        self._status.grid(row=2, column=0, columnspan=2, sticky="ew",
-                          padx=PAD_X * 2, pady=(0, 6))
+        self._status.grid(row=2, column=0, columnspan=2, sticky="ew", padx=PAD_X * 2, pady=(0, 6))
 
     # ------------------------------------------------------------ queue ops
 
@@ -301,19 +310,26 @@ class App(ctk.CTk):
         card.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            card, text=item.kind,
+            card,
+            text=item.kind,
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=("gray20", "gray80"),
         ).grid(row=0, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0))
 
         ctk.CTkLabel(
-            card, text=item.summary(),
-            anchor="w", wraplength=320, justify="left",
+            card,
+            text=item.summary(),
+            anchor="w",
+            wraplength=320,
+            justify="left",
         ).grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(0, PAD_Y))
 
         ctk.CTkButton(
-            card, text="✕", width=32,
-            fg_color="transparent", hover_color=("gray80", "gray25"),
+            card,
+            text="✕",
+            width=32,
+            fg_color="transparent",
+            hover_color=("gray80", "gray25"),
             command=lambda i=index: self._remove_item(i),
         ).grid(row=0, column=1, rowspan=2, padx=PAD_X, pady=PAD_Y)
 
@@ -428,13 +444,11 @@ class App(ctk.CTk):
             for item in items:
                 item.apply(plotter, self.data_dir)
             self.after(0, self._finalize_render_ready, plotter, photo_mode)
-        except Exception as exc:                      # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.exception("Rendering failed")
             self.after(0, self._finalize_render_error, exc)
 
-    def _finalize_render_ready(
-        self, plotter: UnifiedPlotter, photo_mode: bool
-    ) -> None:
+    def _finalize_render_ready(self, plotter: UnifiedPlotter, photo_mode: bool) -> None:
         self._render_btn.configure(state="normal", text="Render plot")
         self._status.configure(text="Opening PyVista window…")
         # PyVista's plotter.show() must run on the main thread
@@ -457,7 +471,7 @@ class App(ctk.CTk):
                 photo_mode=photo_mode,
                 on_capture=self._open_photo_editor,
             )
-        except Exception as exc:                       # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.exception("PyVista show() failed")
             messagebox.showerror("Render failed", str(exc))
         finally:
@@ -475,7 +489,7 @@ class App(ctk.CTk):
         try:
             editor = PhotoEditor(self, image=image, initial_dir=self.data_dir)
             self.wait_window(editor)
-        except Exception:                              # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("Photo editor failed")
 
     # ------------------------------------------------------------ appearance

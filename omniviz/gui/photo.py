@@ -58,7 +58,7 @@ def _load_font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         import matplotlib.font_manager as fm
 
         font = ImageFont.truetype(fm.findfont("DejaVu Sans:bold"), px)
-    except Exception:                                            # noqa: BLE001
+    except Exception:  # noqa: BLE001
         font = ImageFont.load_default()
     _font_cache[px] = font
     return font
@@ -99,8 +99,7 @@ def composite_label(
         od = ImageDraw.Draw(overlay)
         mx, my = pad * 0.45, pad * 0.3
         od.rounded_rectangle(
-            [x + bbox[0] - mx, y + bbox[1] - my,
-             x + bbox[0] + tw + mx, y + bbox[1] + th + my],
+            [x + bbox[0] - mx, y + bbox[1] - my, x + bbox[0] + tw + mx, y + bbox[1] + th + my],
             radius=pad * 0.35,
             fill=(0, 0, 0, 150),
         )
@@ -149,7 +148,7 @@ class PhotoEditor(ctk.CTkToplevel):
         try:
             self.grab_set()
             self.focus_force()
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
 
     def _build_widgets(self) -> None:
@@ -170,54 +169,73 @@ class PhotoEditor(ctk.CTkToplevel):
 
         w, h = self._full.size
         ctk.CTkLabel(
-            controls, text=f"{w} × {h}px",
+            controls,
+            text=f"{w} × {h}px",
             font=ctk.CTkFont(size=12, weight="bold"),
         ).grid(row=0, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 2))
 
         ctk.CTkLabel(controls, text="Label").grid(
-            row=1, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0))
+            row=1, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0)
+        )
         self._text_var = ctk.StringVar(value="")
         self._text_var.trace_add("write", lambda *_: self._update_preview())
         ctk.CTkEntry(
-            controls, textvariable=self._text_var,
+            controls,
+            textvariable=self._text_var,
             placeholder_text="e.g. (a) W7-X boundary",
         ).grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=(2, PAD_Y))
 
         ctk.CTkLabel(controls, text="Position").grid(
-            row=3, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0))
+            row=3, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0)
+        )
         self._corner = ctk.CTkOptionMenu(
-            controls, values=list(_CORNERS), command=lambda _: self._update_preview())
+            controls, values=list(_CORNERS), command=lambda _: self._update_preview()
+        )
         self._corner.set("Bottom-left")
         self._corner.grid(row=4, column=0, sticky="ew", padx=PAD_X, pady=(2, PAD_Y))
 
         ctk.CTkLabel(controls, text="Text color").grid(
-            row=5, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0))
+            row=5, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0)
+        )
         self._color = ctk.CTkOptionMenu(
-            controls, values=list(_COLORS), command=lambda _: self._update_preview())
+            controls, values=list(_COLORS), command=lambda _: self._update_preview()
+        )
         self._color.set("White")
         self._color.grid(row=6, column=0, sticky="ew", padx=PAD_X, pady=(2, PAD_Y))
 
         self._font_var = ctk.DoubleVar(value=4.5)
         ctk.CTkLabel(controls, text="Font size").grid(
-            row=7, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0))
+            row=7, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0)
+        )
         ctk.CTkSlider(
-            controls, from_=2.0, to=10.0, variable=self._font_var,
+            controls,
+            from_=2.0,
+            to=10.0,
+            variable=self._font_var,
             command=lambda _: self._update_preview(),
         ).grid(row=8, column=0, sticky="ew", padx=PAD_X, pady=(2, PAD_Y))
 
         self._box_var = ctk.BooleanVar(value=True)
         ctk.CTkSwitch(
-            controls, text="Caption background", variable=self._box_var,
+            controls,
+            text="Caption background",
+            variable=self._box_var,
             command=self._update_preview,
         ).grid(row=9, column=0, sticky="w", padx=PAD_X, pady=PAD_Y)
 
         ctk.CTkButton(
-            controls, text="Save image…", height=42,
-            font=ctk.CTkFont(size=14, weight="bold"), command=self._save,
+            controls,
+            text="Save image…",
+            height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._save,
         ).grid(row=10, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y * 2, 4))
 
         ctk.CTkButton(
-            controls, text="Close", fg_color="transparent", border_width=1,
+            controls,
+            text="Close",
+            fg_color="transparent",
+            border_width=1,
             command=self._close,
         ).grid(row=11, column=0, sticky="ew", padx=PAD_X, pady=(4, PAD_Y))
 
@@ -248,15 +266,17 @@ class PhotoEditor(ctk.CTkToplevel):
             initialdir=str(self._initial_dir),
             initialfile=default,
             defaultextension=".png",
-            filetypes=[("PNG image", "*.png"), ("JPEG image", "*.jpg"),
-                       ("TIFF image", "*.tif"), ("All files", "*.*")],
+            filetypes=[
+                ("PNG image", "*.png"),
+                ("JPEG image", "*.jpg"),
+                ("TIFF image", "*.tif"),
+                ("All files", "*.*"),
+            ],
         )
         if not path:
             return
 
-        final = composite_label(
-            self._full, self._text_var.get(), **self._current_kwargs()
-        )
+        final = composite_label(self._full, self._text_var.get(), **self._current_kwargs())
         try:
             if path.lower().endswith((".jpg", ".jpeg")):
                 final.save(path, quality=95)
@@ -272,6 +292,6 @@ class PhotoEditor(ctk.CTkToplevel):
     def _close(self) -> None:
         try:
             self.grab_release()
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
         self.destroy()

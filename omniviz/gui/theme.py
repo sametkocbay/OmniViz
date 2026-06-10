@@ -4,14 +4,33 @@ from __future__ import annotations
 
 # Color palettes for selectable plot tints (used in dropdowns)
 COLOR_PALETTE: tuple[str, ...] = (
-    "red", "orange", "yellow", "green", "cyan", "blue",
-    "violet", "purple", "magenta", "white", "gray", "black",
-    "lightblue", "crimson",
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "cyan",
+    "blue",
+    "violet",
+    "purple",
+    "magenta",
+    "white",
+    "gray",
+    "black",
+    "lightblue",
+    "crimson",
 )
 
 COLORMAPS: tuple[str, ...] = (
-    "plasma", "viridis", "inferno", "magma", "cividis",
-    "jet", "hot", "coolwarm", "rainbow", "turbo",
+    "plasma",
+    "viridis",
+    "inferno",
+    "magma",
+    "cividis",
+    "jet",
+    "hot",
+    "coolwarm",
+    "rainbow",
+    "turbo",
 )
 
 # Geometric constants
