@@ -16,18 +16,20 @@ import logging
 import os
 import shutil
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 # pyvistaqt/qtpy must see the chosen Qt binding before they import it.
 os.environ.setdefault("QT_API", "pyside6")
 
-from qtpy.QtCore import QSize, Qt  # noqa: E402
+from qtpy.QtCore import QSize, Qt, QThread, Signal  # noqa: E402
 from qtpy.QtGui import (  # noqa: E402
     QAction,
     QActionGroup,
     QColor,
     QIcon,
+    QImage,
     QKeySequence,
     QPixmap,
     QShortcut,
@@ -36,6 +38,7 @@ from qtpy.QtWidgets import (  # noqa: E402
     QApplication,
     QColorDialog,
     QComboBox,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QFrame,
@@ -47,7 +50,7 @@ from qtpy.QtWidgets import (  # noqa: E402
     QScrollArea,
     QSizePolicy,
     QSlider,
-    QTabWidget,
+    QToolBox,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -71,7 +74,7 @@ from omniviz.gui.qt_panels import (  # noqa: E402
     WirePanel,
     categorize_files_qt,
 )
-from omniviz.gui.qt_style import apply_theme  # noqa: E402
+from omniviz.gui.qt_style import apply_theme, viz_background  # noqa: E402
 from omniviz.gui.theme import COLORMAPS  # noqa: E402
 from omniviz.models import ProfileItem, ViewItem  # noqa: E402
 from omniviz.plotter import UnifiedPlotter  # noqa: E402
@@ -82,11 +85,6 @@ log = logging.getLogger(__name__)
 def _project_root() -> Path:
     """Return the project root (parent of the ``omniviz`` package)."""
     return Path(__file__).resolve().parents[2]
-
-
-# --------------------------------------------------------------------------- #
-# Background worker — keep heavy item.apply() off the UI thread
-# --------------------------------------------------------------------------- #
 
 
 # --------------------------------------------------------------------------- #
@@ -275,6 +273,150 @@ class _SceneRow(QWidget):
         return self._bar_btn.isChecked() if self._bar_btn is not None else False
 
 
+@dataclass
+class _ClipPlaneItem(ViewItem):
+    """A scene-tree entry standing in for the interactive clip plane.
+
+    It owns no actors of its own; enabling/disabling clipping is handled by the
+    window. Present so the clip shows up in the scene tree and can be removed.
+    """
+
+    label: str = "Clip plane"
+    kind: str = "CLIP PLANE"
+
+    def summary(self) -> str:
+        return "interactive clip plane — drag the handle in the view"
+
+    def apply(self, plotter: UnifiedPlotter, data_dir: Path) -> None:  # noqa: D401
+        # Clipping is driven by the window, not by an actor.
+        return None
+
+
+def _pil_to_qpixmap(image) -> QPixmap:
+    """Convert a PIL image to a QPixmap (copying so the buffer can be freed)."""
+    rgba = image.convert("RGBA")
+    data = rgba.tobytes("raw", "RGBA")
+    qimg = QImage(data, rgba.width, rgba.height, 4 * rgba.width, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qimg.copy())
+
+
+class _RenderWorker(QThread):
+    """Render the scene to a high-quality image off the main thread.
+
+    Builds a *separate* off-screen ``pv.Plotter`` entirely inside this thread
+    (so no VTK object is shared with the live QtInteractor), re-applies the
+    queued items, matches the camera, and emits a PIL image. This keeps the
+    main window responsive while a publication-quality frame is produced.
+    """
+
+    done = Signal(object)  # PIL.Image
+    failed = Signal(object)  # Exception
+
+    def __init__(
+        self,
+        items: list[ViewItem],
+        data_dir: Path,
+        camera,
+        background: str,
+        size: tuple[int, int] = (1920, 1440),
+    ) -> None:
+        super().__init__()
+        self._items = items
+        self._data_dir = data_dir
+        self._camera = camera
+        self._background = background
+        self._size = size
+
+    def run(self) -> None:  # noqa: D401 - QThread entry point
+        try:
+            import numpy as np
+            import pyvista as pv
+            from PIL import Image
+
+            pl = pv.Plotter(off_screen=True, window_size=list(self._size), lighting="light_kit")
+            pl.set_background(self._background)
+            up = UnifiedPlotter(plotter=pl)
+            for item in self._items:
+                if isinstance(item, ProfileItem):
+                    continue
+                try:
+                    item.apply(up, self._data_dir)
+                except Exception:  # noqa: BLE001
+                    log.debug("Render: applying %s failed", item.label, exc_info=True)
+            for enable in ("enable_anti_aliasing", "enable_shadows"):
+                try:
+                    getattr(pl, enable)()
+                except Exception:  # noqa: BLE001
+                    log.debug("Render: %s unavailable", enable, exc_info=True)
+            if self._camera is not None:
+                try:
+                    pl.camera_position = self._camera
+                except Exception:  # noqa: BLE001
+                    log.debug("Render: camera restore failed", exc_info=True)
+            arr = pl.screenshot(return_img=True)
+            pl.close()
+            self.done.emit(Image.fromarray(np.asarray(arr)))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("High-quality render failed")
+            self.failed.emit(exc)
+
+
+class _RenderPreviewDialog(QDialog):
+    """Non-modal preview of a rendered frame, with a Save button."""
+
+    def __init__(self, parent: QWidget, image, default_dir: Path) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Rendered preview")
+        self.resize(960, 760)
+        self._image = image
+        self._default_dir = default_dir
+
+        layout = QVBoxLayout(self)
+        label = QLabel()
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setPixmap(
+            _pil_to_qpixmap(image).scaled(
+                920,
+                680,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(label)
+        layout.addWidget(scroll, stretch=1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        save = QPushButton("Save…")
+        save.setProperty("class", "primary")
+        save.clicked.connect(self._save)
+        buttons.addWidget(save)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def _save(self) -> None:
+        default = str(self._default_dir / f"omniviz_render_{datetime.now():%Y%m%d_%H%M%S}.png")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save rendered figure",
+            default,
+            "PNG image (*.png);;JPEG image (*.jpg);;TIFF image (*.tif);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith((".jpg", ".jpeg")):
+                self._image.convert("RGB").save(path, quality=95)
+            else:
+                self._image.save(path)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+
+
 # --------------------------------------------------------------------------- #
 # Main window
 # --------------------------------------------------------------------------- #
@@ -309,9 +451,20 @@ class MainWindow(QMainWindow):
             placeholder = QLabel("3D view unavailable (no OpenGL context).")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.setCentralWidget(placeholder)
-        self.plotter = UnifiedPlotter(background="white", plotter=self.interactor)
+        self.plotter = UnifiedPlotter(
+            background=viz_background(self._theme_mode), plotter=self.interactor
+        )
         self._axes_on = False
         self._bounds_on = False
+
+        # -- clip-plane state
+        self._clip_item: _ClipPlaneItem | None = None
+        self._clip_actor = None
+        self._clip_hidden_ids: list[str] = []
+
+        # -- background render state (kept referenced so threads/dialogs survive)
+        self._render_threads: list[_RenderWorker] = []
+        self._preview_dialogs: list[_RenderPreviewDialog] = []
 
         # -- 2D profile canvas (lazy)
         self._profile_canvas = None
@@ -375,8 +528,9 @@ class MainWindow(QMainWindow):
         col.setSpacing(0)
         col.addWidget(self._build_header())
 
-        self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
+        # An accordion: sections stack vertically and only one is open at a
+        # time — clicking a section header expands it and collapses the others.
+        self._tabs = QToolBox()
         col.addWidget(self._tabs, stretch=1)
 
         self._panels: dict[str, object] = {}
@@ -402,7 +556,7 @@ class MainWindow(QMainWindow):
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
             scroll.setWidget(panel)
-            self._tabs.addTab(scroll, name)
+            self._tabs.addItem(scroll, name)
 
         dock.setWidget(container)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
@@ -534,10 +688,18 @@ class MainWindow(QMainWindow):
         file_menu.addAction(reload_scene_action)
 
         screenshot_action = QAction(standard_icon("SP_DialogSaveButton"), "Export", self)
-        screenshot_action.setToolTip("Capture a high-res screenshot / export")
+        screenshot_action.setToolTip("Capture a quick screenshot of the current view")
         screenshot_action.triggered.connect(self._export_screenshot)
         file_menu.addAction(screenshot_action)
         toolbar.addAction(screenshot_action)
+
+        self._render_action = QAction(standard_icon("SP_MediaPlay"), "Render", self)
+        self._render_action.setToolTip(
+            "Render a high-quality shaded frame in the background, then preview & save"
+        )
+        self._render_action.triggered.connect(self._render_quality)
+        file_menu.addAction(self._render_action)
+        toolbar.addAction(self._render_action)
 
         # -- View menu (appearance) + toolbar spacer + theme toggle
         appearance = menubar.addMenu("&Appearance")
@@ -571,6 +733,12 @@ class MainWindow(QMainWindow):
             apply_theme(app, mode)
         self._dark_action.setChecked(mode == "dark")
         self._light_action.setChecked(mode == "light")
+        # Keep the 3D view background in step with the theme.
+        try:
+            self.plotter.plotter.set_background(viz_background(mode))
+            self.plotter.render()
+        except Exception:  # noqa: BLE001
+            log.debug("Background theme sync failed", exc_info=True)
         self._log(f"Theme: {mode}")
 
     def _cycle_theme(self) -> None:
@@ -616,8 +784,11 @@ class MainWindow(QMainWindow):
         self._on_apply_done(item)
 
     def _on_apply_done(self, item: ViewItem) -> None:
-        self.plotter.render()
         self._apply_row_state(item)
+        # Fold any newly-added geometry into an active clip plane.
+        if self._clip_item is not None:
+            self._rebuild_clip()
+        self.plotter.render()
         self._log(f"Added {item.kind}: {item.label}")
 
     def _on_apply_failed(self, item: ViewItem, exc: Exception) -> None:
@@ -629,6 +800,11 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _clear_items(self) -> None:
+        # Drop the clip widget first so it doesn't dangle over a cleared scene.
+        if self._clip_item is not None:
+            self._teardown_clip_widget()
+            self._clip_item = None
+            self._clip_action.setChecked(False)
         self.plotter.clear_items()
         self.plotter.render()
         self._items.clear()
@@ -640,13 +816,22 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _remove_item(self, item: ViewItem) -> None:
+        # The clip plane is special: removing its row tears the clip down and
+        # restores the hidden originals.
+        if item is self._clip_item:
+            self._disable_clip()
+            return
         self.plotter.remove_item(item.id)
         if item in self._items:
             self._items.remove(item)
         self._remove_tree_row(item)
         if isinstance(item, ProfileItem):
             self._rebuild_profile_plot()
+        # Keep an active clip consistent with the changed actor set.
+        if self._clip_item is not None:
+            self._rebuild_clip()
         self._update_status()
+        self.plotter.render()
         self._log(f"Removed {item.label}")
 
     # -- scene tree ----------------------------------------------------------
@@ -681,6 +866,16 @@ class MainWindow(QMainWindow):
 
     def _on_row_changed(self, item: ViewItem) -> None:
         if isinstance(item, ProfileItem):
+            return
+        if item is self._clip_item:
+            # The clip row's eye shows/hides the clip widget+actor.
+            _node, row = self._find_tree_node(item)
+            if row is not None and self._clip_actor is not None:
+                try:
+                    self._clip_actor.SetVisibility(row.visible)
+                    self.plotter.render()
+                except Exception:  # noqa: BLE001
+                    log.debug("clip visibility toggle failed", exc_info=True)
             return
         self._apply_row_state(item)
 
@@ -796,50 +991,130 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 log.debug("Background change failed", exc_info=True)
 
-    def _toggle_clip(self) -> None:
-        """Add/remove an interactive clip-plane widget on the whole scene.
-
-        We use PyVista's `add_mesh_clip_plane` interactive widget against a
-        merged copy of the live meshes — simpler and more discoverable than
-        reapplying `UnifiedPlotter.set_clip_plane` to every item.
-        """
-        p = self.plotter.plotter
-        if self._clip_action.isChecked():
+    @staticmethod
+    def _actor_dataset(handle):
+        """Best-effort extraction of the dataset behind an actor (incl. glyphs)."""
+        mapper = getattr(handle, "mapper", None)
+        if mapper is None:
+            return None
+        ds = getattr(mapper, "dataset", None)
+        if ds is not None:
+            return ds
+        for getter in ("GetInputAsDataSet", "GetInput"):
             try:
-                merged = p.renderer.actors  # noqa: F841 - presence check only
-                # Re-add each tracked actor's dataset under an interactive clip.
-                # Simplest robust path: enable a clip box widget on the union.
-                import pyvista as pv
-
-                blocks = []
-                for handles in self.plotter._actors.values():
-                    for h in handles:
-                        mapper = getattr(h, "mapper", None)
-                        ds = getattr(mapper, "dataset", None) if mapper is not None else None
-                        if ds is not None:
-                            blocks.append(ds)
-                if not blocks:
-                    self._log("Clip: nothing to clip")
-                    self._clip_action.setChecked(False)
-                    return
-                union = pv.MultiBlock(blocks).combine()
-                self._clip_actor = p.add_mesh_clip_plane(union, name="__omniviz_clip__")
-                self._log("Clip plane enabled (drag the widget)")
-                self.plotter.render()
-            except Exception as exc:  # noqa: BLE001
-                log.debug("Clip enable failed", exc_info=True)
-                self._log(f"Clip unavailable: {exc}")
-                self._clip_action.setChecked(False)
-        else:
-            try:
-                p.clear_plane_widgets()
-                if getattr(self, "_clip_actor", None) is not None:
-                    p.remove_actor(self._clip_actor)
-                    self._clip_actor = None
-                self.plotter.render()
-                self._log("Clip plane disabled")
+                got = getattr(mapper, getter)()
+                if got is not None:
+                    return got
             except Exception:  # noqa: BLE001
-                log.debug("Clip disable failed", exc_info=True)
+                continue
+        return None
+
+    def _toggle_clip(self) -> None:
+        """Enable/disable the interactive clip plane from the toolbar toggle."""
+        if self._clip_action.isChecked():
+            self._enable_clip()
+        else:
+            self._disable_clip()
+
+    def _enable_clip(self) -> None:
+        """Turn on an interactive clip plane and register it in the scene tree."""
+        if self._clip_item is not None:
+            return
+        self._clip_item = _ClipPlaneItem()
+        self._items.append(self._clip_item)
+        self._add_tree_row(self._clip_item)
+        if not self._rebuild_clip():
+            # Nothing to clip — roll the row/item back out.
+            self._remove_tree_row(self._clip_item)
+            if self._clip_item in self._items:
+                self._items.remove(self._clip_item)
+            self._clip_item = None
+            self._clip_action.setChecked(False)
+            self._update_status()
+            self._log("Clip: nothing to clip")
+            return
+        self._clip_action.setChecked(True)
+        self._update_status()
+        self._log("Clip plane enabled — drag the handle in the view")
+        self.plotter.render()
+
+    def _disable_clip(self) -> None:
+        """Tear down the clip plane and restore the original actors."""
+        self._teardown_clip_widget()
+        if self._clip_item is not None:
+            self._remove_tree_row(self._clip_item)
+            if self._clip_item in self._items:
+                self._items.remove(self._clip_item)
+            self._clip_item = None
+        self._clip_action.setChecked(False)
+        self._update_status()
+        self.plotter.render()
+        self._log("Clip plane disabled")
+
+    def _teardown_clip_widget(self) -> None:
+        """Remove the clip widget/actor and un-hide the clipped originals."""
+        p = self.plotter.plotter
+        try:
+            p.clear_plane_widgets()
+        except Exception:  # noqa: BLE001
+            log.debug("clear_plane_widgets failed", exc_info=True)
+        if self._clip_actor is not None:
+            try:
+                p.remove_actor(self._clip_actor)
+            except Exception:  # noqa: BLE001
+                log.debug("remove clip actor failed", exc_info=True)
+            self._clip_actor = None
+        for item_id in self._clip_hidden_ids:
+            for handle in self.plotter._actors.get(item_id, []):
+                try:
+                    handle.SetVisibility(True)
+                except Exception:  # noqa: BLE001
+                    log.debug("restore visibility failed", exc_info=True)
+        self._clip_hidden_ids = []
+
+    def _rebuild_clip(self) -> bool:
+        """(Re)build the clipped union from the current data actors.
+
+        Hides the original data actors and shows one interactive clip plane over
+        their merged geometry, so the clip visibly affects the whole scene and
+        stays correct when items are added/removed while clip is active.
+        """
+        import pyvista as pv
+
+        self._teardown_clip_widget()
+        blocks = []
+        hidden: list[str] = []
+        for item_id, handles in self.plotter._actors.items():
+            datasets = [ds for h in handles if (ds := self._actor_dataset(h)) is not None]
+            if not datasets:
+                continue
+            blocks.extend(datasets)
+            for handle in handles:
+                try:
+                    handle.SetVisibility(False)
+                except Exception:  # noqa: BLE001
+                    log.debug("hide actor failed", exc_info=True)
+            hidden.append(item_id)
+        if not blocks:
+            return False
+        try:
+            union = pv.MultiBlock(blocks).combine()
+            self._clip_actor = self.plotter.plotter.add_mesh_clip_plane(
+                union, name="__omniviz_clip__"
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("add_mesh_clip_plane failed", exc_info=True)
+            self._log(f"Clip unavailable: {exc}")
+            # Un-hide on failure.
+            for item_id in hidden:
+                for handle in self.plotter._actors.get(item_id, []):
+                    try:
+                        handle.SetVisibility(True)
+                    except Exception:  # noqa: BLE001
+                        pass
+            return False
+        self._clip_hidden_ids = hidden
+        return True
 
     # ----------------------------------------------------------------- profile
 
@@ -965,16 +1240,23 @@ class MainWindow(QMainWindow):
     def _reload_scene(self) -> None:
         """Clear the live scene and re-apply every queued item from disk."""
         items = list(self._items)
+        clip_was_active = self._clip_item is not None
+        self._teardown_clip_widget()
         self.plotter.clear_items()
         self.plotter.render()
         if self._profile_ax is not None:
             self._profile_ax.clear()
             self._profile_canvas.draw_idle()
         for item in items:
+            if isinstance(item, _ClipPlaneItem):
+                continue
             if isinstance(item, ProfileItem):
                 self._render_profile(item)
             else:
-                self._apply_item_async(item)
+                self._apply_item(item)
+        if clip_was_active:
+            self._rebuild_clip()
+            self.plotter.render()
         self._log("Reloaded scene from disk")
 
     # ----------------------------------------------------------------- export
@@ -1033,6 +1315,54 @@ class MainWindow(QMainWindow):
 
         text, ok = QInputDialog.getText(self, "Caption", "Optional caption (blank for none):")
         return text, ok
+
+    # ----------------------------------------------------------------- render
+
+    def _render_quality(self) -> None:
+        """Render a high-quality shaded frame in the background, then preview."""
+        renderables = [
+            it for it in self._items if not isinstance(it, (ProfileItem, _ClipPlaneItem))
+        ]
+        if not renderables:
+            QMessageBox.information(self, "Nothing to render", "Add at least one 3D item first.")
+            return
+
+        camera = None
+        if self.interactor is not None:
+            try:
+                camera = self.plotter.plotter.camera_position
+            except Exception:  # noqa: BLE001
+                camera = None
+
+        worker = _RenderWorker(
+            list(renderables),
+            self.data_dir,
+            camera,
+            viz_background(self._theme_mode),
+        )
+        worker.done.connect(self._on_render_done)
+        worker.failed.connect(self._on_render_failed)
+        worker.finished.connect(lambda w=worker: self._render_threads.remove(w))
+        self._render_threads.append(worker)
+        self._render_action.setEnabled(False)
+        self._log("Rendering high-quality frame in the background…")
+        worker.start()
+
+    def _on_render_done(self, image) -> None:
+        self._render_action.setEnabled(True)
+        self._log("Render ready.")
+        dialog = _RenderPreviewDialog(self, image, self.data_dir)
+        dialog.finished.connect(
+            lambda _r, d=dialog: (
+                self._preview_dialogs.remove(d) if d in self._preview_dialogs else None
+            )
+        )
+        self._preview_dialogs.append(dialog)
+        dialog.show()  # non-modal: the main window stays usable
+
+    def _on_render_failed(self, exc: Exception) -> None:
+        self._render_action.setEnabled(True)
+        QMessageBox.critical(self, "Render failed", str(exc))
 
     # ----------------------------------------------------------------- status
 

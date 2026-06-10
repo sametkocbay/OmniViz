@@ -68,6 +68,11 @@ def _palette(mode: str) -> _Palette:
     return _LIGHT if mode.lower() == "light" else _DARK
 
 
+def viz_background(mode: str = "dark") -> str:
+    """Background colour for the embedded 3D view, matched to the theme."""
+    return _palette(mode).panel
+
+
 def stylesheet(mode: str = "dark") -> str:
     """Return the full QSS string for the requested ``mode``."""
     p = _palette(mode)
