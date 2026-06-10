@@ -85,18 +85,19 @@ class CopyProgressDialog(ctk.CTkToplevel):
         )
         self._sub.grid(row=1, column=0, sticky="ew", padx=PAD_X * 2, pady=(0, PAD_Y))
 
-        self._bar = ctk.CTkProgressBar(self, mode="determinate",
-                                       corner_radius=CORNER_RADIUS)
+        self._bar = ctk.CTkProgressBar(self, mode="determinate", corner_radius=CORNER_RADIUS)
         self._bar.set(0.0)
         self._bar.grid(row=2, column=0, sticky="ew", padx=PAD_X * 2, pady=4)
 
         self._cancel_btn = ctk.CTkButton(
-            self, text="Cancel", width=100,
-            fg_color="transparent", border_width=1,
+            self,
+            text="Cancel",
+            width=100,
+            fg_color="transparent",
+            border_width=1,
             command=self._request_cancel,
         )
-        self._cancel_btn.grid(row=3, column=0, sticky="e",
-                              padx=PAD_X * 2, pady=PAD_Y * 2)
+        self._cancel_btn.grid(row=3, column=0, sticky="e", padx=PAD_X * 2, pady=PAD_Y * 2)
 
     # -------------------------------------------------------- worker side
 
@@ -118,7 +119,7 @@ class CopyProgressDialog(ctk.CTkToplevel):
             else:
                 # Preserve mtime/permissions, matching shutil.copy2 semantics.
                 shutil.copystat(self._src, self._dst, follow_symlinks=False)
-        except BaseException as exc:                          # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
             self._error = exc
             self._dst.unlink(missing_ok=True)
         finally:
@@ -145,7 +146,7 @@ class CopyProgressDialog(ctk.CTkToplevel):
     def _finalize(self) -> None:
         try:
             self.grab_release()
-        except Exception:                                     # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
         success = (not self._cancel.is_set()) and self._error is None
         result = self._dst if success else None
@@ -154,6 +155,7 @@ class CopyProgressDialog(ctk.CTkToplevel):
         self.destroy()
         if error is not None:
             import tkinter.messagebox as messagebox
+
             messagebox.showerror("Import failed", f"{self._src.name}: {error}")
         if callback:
             callback(result)

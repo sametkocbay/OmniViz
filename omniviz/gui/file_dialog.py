@@ -89,7 +89,7 @@ class FileBrowserDialog(ctk.CTkToplevel):
     def _safe_grab(self) -> None:
         try:
             self.grab_set()
-        except tk.TclError:                                    # window not viewable yet
+        except tk.TclError:  # window not viewable yet
             self.after(50, self._safe_grab)
 
     # ------------------------------------------------------------ build UI
@@ -103,26 +103,32 @@ class FileBrowserDialog(ctk.CTkToplevel):
         top.grid(row=0, column=0, sticky="ew", padx=PAD_X, pady=(PAD_X, 4))
         top.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkButton(top, text="↑ Up", width=70,
-                      command=self._go_up).grid(row=0, column=0, padx=(0, PAD_X))
+        ctk.CTkButton(top, text="↑ Up", width=70, command=self._go_up).grid(
+            row=0, column=0, padx=(0, PAD_X)
+        )
 
         self._path_var = tk.StringVar(value=str(self._cwd))
         self._path_entry = ctk.CTkEntry(top, textvariable=self._path_var)
         self._path_entry.grid(row=0, column=1, sticky="ew")
         self._path_entry.bind("<Return>", lambda _e: self._go_to_path())
 
-        ctk.CTkButton(top, text="Go", width=60,
-                      command=self._go_to_path).grid(row=0, column=2, padx=(PAD_X, 0))
+        ctk.CTkButton(top, text="Go", width=60, command=self._go_to_path).grid(
+            row=0, column=2, padx=(PAD_X, 0)
+        )
 
         # -- shortcut bar
         nav = ctk.CTkFrame(self, fg_color="transparent")
         nav.grid(row=1, column=0, sticky="ew", padx=PAD_X, pady=(0, 4))
-        ctk.CTkButton(nav, text="Home", width=70,
-                      command=lambda: self._navigate(Path.home())).grid(row=0, column=0, padx=(0, 4))
-        ctk.CTkButton(nav, text="Root  /", width=70,
-                      command=lambda: self._navigate(Path("/"))).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(nav, text="Home", width=70, command=lambda: self._navigate(Path.home())).grid(
+            row=0, column=0, padx=(0, 4)
+        )
+        ctk.CTkButton(
+            nav, text="Root  /", width=70, command=lambda: self._navigate(Path("/"))
+        ).grid(row=0, column=1, padx=4)
         ctk.CTkCheckBox(
-            nav, text="Show hidden", variable=self._show_hidden,
+            nav,
+            text="Show hidden",
+            variable=self._show_hidden,
             command=self._populate,
         ).grid(row=0, column=2, padx=(PAD_X, 0))
 
@@ -146,23 +152,31 @@ class FileBrowserDialog(ctk.CTkToplevel):
         self._filter_menu.grid(row=0, column=1, sticky="ew")
 
         ctk.CTkButton(
-            bottom, text="Cancel", width=100,
-            fg_color="transparent", border_width=1,
+            bottom,
+            text="Cancel",
+            width=100,
+            fg_color="transparent",
+            border_width=1,
             command=self._on_cancel,
         ).grid(row=0, column=2, padx=(PAD_X, 4))
 
         self._open_btn = ctk.CTkButton(
-            bottom, text="Open", width=100, command=self._on_open, state="disabled",
+            bottom,
+            text="Open",
+            width=100,
+            command=self._on_open,
+            state="disabled",
         )
         self._open_btn.grid(row=0, column=3)
 
         # selected-file row
         self._selected_label = ctk.CTkLabel(
-            bottom, text="No file selected.",
-            text_color=("gray35", "gray70"), anchor="w",
+            bottom,
+            text="No file selected.",
+            text_color=("gray35", "gray70"),
+            anchor="w",
         )
-        self._selected_label.grid(row=1, column=0, columnspan=4,
-                                  sticky="ew", padx=2, pady=(6, 0))
+        self._selected_label.grid(row=1, column=0, columnspan=4, sticky="ew", padx=2, pady=(6, 0))
 
     # ------------------------------------------------------------ list view
 
@@ -179,7 +193,8 @@ class FileBrowserDialog(ctk.CTkToplevel):
             children = list(self._cwd.iterdir())
         except (PermissionError, OSError) as exc:
             ctk.CTkLabel(
-                self._list, text=f"(cannot list directory: {exc})",
+                self._list,
+                text=f"(cannot list directory: {exc})",
                 text_color=("gray35", "gray70"),
             ).grid(row=0, column=0, padx=PAD_X, pady=PAD_Y, sticky="w")
             return
@@ -198,7 +213,9 @@ class FileBrowserDialog(ctk.CTkToplevel):
 
             icon = "📁 " if is_dir else "📄 "
             btn = ctk.CTkButton(
-                self._list, text=f"{icon} {p.name}", anchor="w",
+                self._list,
+                text=f"{icon} {p.name}",
+                anchor="w",
                 fg_color="transparent",
                 text_color=("gray10", "gray90"),
                 hover_color=("gray85", "gray25"),
@@ -211,7 +228,8 @@ class FileBrowserDialog(ctk.CTkToplevel):
 
         if row == 0:
             ctk.CTkLabel(
-                self._list, text="(empty)",
+                self._list,
+                text="(empty)",
                 text_color=("gray35", "gray70"),
             ).grid(row=0, column=0, padx=PAD_X, pady=PAD_Y, sticky="w")
 

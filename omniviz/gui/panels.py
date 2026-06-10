@@ -34,6 +34,7 @@ OnAdd = Callable[[ViewItem], None]
 # Reusable form widgets
 # --------------------------------------------------------------------------- #
 
+
 class FilePickerFrame(ctk.CTkFrame):
     """A searchable list of files with a single-select highlight."""
 
@@ -69,9 +70,9 @@ class FilePickerFrame(ctk.CTkFrame):
         files = [f for f in self._files if query in f.lower()] if query else self._files
 
         if not files:
-            placeholder = ctk.CTkLabel(self._scroll,
-                                       text="(no matching files)",
-                                       text_color="gray60")
+            placeholder = ctk.CTkLabel(
+                self._scroll, text="(no matching files)", text_color="gray60"
+            )
             placeholder.grid(row=0, column=0, sticky="w", padx=PAD_X, pady=PAD_Y)
             self._buttons.append(placeholder)
             return
@@ -114,6 +115,7 @@ def _row_label(master, row: int, col: int, text: str) -> None:
 # Base panel
 # --------------------------------------------------------------------------- #
 
+
 class BasePanel(ctk.CTkFrame, Generic[T]):
     """Common scaffolding: header, options grid, file picker, add button."""
 
@@ -127,9 +129,9 @@ class BasePanel(ctk.CTkFrame, Generic[T]):
 
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(self, text=self.title,
-                     font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 4))
+        ctk.CTkLabel(self, text=self.title, font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 4)
+        )
 
         self._picker: FilePickerFrame | None = None
         next_row = 1
@@ -145,9 +147,9 @@ class BasePanel(ctk.CTkFrame, Generic[T]):
         options.grid_columnconfigure(3, weight=1)
         self._build_options(options)
 
-        ctk.CTkButton(self, text=self.button_label, height=36,
-                      command=self._handle_add).grid(
-            row=next_row + 1, column=0, sticky="e", padx=PAD_X, pady=PAD_Y)
+        ctk.CTkButton(self, text=self.button_label, height=36, command=self._handle_add).grid(
+            row=next_row + 1, column=0, sticky="e", padx=PAD_X, pady=PAD_Y
+        )
 
     # -- override hooks ------------------------------------------------------ #
 
@@ -171,6 +173,7 @@ class BasePanel(ctk.CTkFrame, Generic[T]):
 # --------------------------------------------------------------------------- #
 # Concrete panels
 # --------------------------------------------------------------------------- #
+
 
 class PointCloudPanel(BasePanel[PointCloudItem]):
     title = "Point Clouds"
@@ -430,6 +433,7 @@ class WirePanel(BasePanel[WireItem]):
 # --------------------------------------------------------------------------- #
 # File categorization
 # --------------------------------------------------------------------------- #
+
 
 def categorize_files(data_dir: Path) -> dict[str, list[str]]:
     """Bin files in ``data_dir`` by their visualization category."""
