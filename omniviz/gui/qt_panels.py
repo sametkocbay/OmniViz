@@ -184,10 +184,12 @@ class BasePanel(QWidget, Generic[T]):
         self._files = list(files or [])
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
         if self.title:
             header = QLabel(self.title)
-            header.setStyleSheet("font-weight: bold; font-size: 14px;")
+            header.setStyleSheet("font-weight: 700; font-size: 15px;")
             root.addWidget(header)
 
         self._picker: FilePicker | None = None
@@ -201,6 +203,8 @@ class BasePanel(QWidget, Generic[T]):
         root.addWidget(options)
 
         add_btn = QPushButton(self.button_label)
+        # Mark as the primary action so the QSS accent rule styles it.
+        add_btn.setProperty("class", "primary")
         add_btn.clicked.connect(self._handle_add)
         root.addWidget(add_btn, alignment=Qt.AlignmentFlag.AlignRight)
         root.addStretch(0)

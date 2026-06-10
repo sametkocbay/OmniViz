@@ -22,21 +22,33 @@ from pathlib import Path
 # pyvistaqt/qtpy must see the chosen Qt binding before they import it.
 os.environ.setdefault("QT_API", "pyside6")
 
-from qtpy.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal  # noqa: E402
-from qtpy.QtGui import QAction, QColor, QIcon, QKeySequence, QShortcut  # noqa: E402
+from qtpy.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal  # noqa: E402
+from qtpy.QtGui import (  # noqa: E402
+    QAction,
+    QActionGroup,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from qtpy.QtWidgets import (  # noqa: E402
     QApplication,
-    QCheckBox,
     QColorDialog,
+    QComboBox,
     QDockWidget,
-    QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSlider,
     QTabWidget,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -45,6 +57,7 @@ from qtpy.QtWidgets import (  # noqa: E402
 
 from omniviz import __version__  # noqa: E402
 from omniviz.assets import LOGO_PATH  # noqa: E402
+from omniviz.gui.qt_icons import badge_icon, standard_icon, swatch_icon  # noqa: E402
 from omniviz.gui.qt_panels import (  # noqa: E402
     BoundaryPanel,
     CariddiCurrentDensityPanel,
@@ -58,6 +71,8 @@ from omniviz.gui.qt_panels import (  # noqa: E402
     WirePanel,
     categorize_files_qt,
 )
+from omniviz.gui.qt_style import apply_theme  # noqa: E402
+from omniviz.gui.theme import COLORMAPS  # noqa: E402
 from omniviz.models import ProfileItem, ViewItem  # noqa: E402
 from omniviz.plotter import UnifiedPlotter  # noqa: E402
 
@@ -108,82 +123,185 @@ class _ApplyWorker(QRunnable):
 # --------------------------------------------------------------------------- #
 
 
+#: Item ``kind`` strings that colour by a scalar/magnitude and therefore expose
+#: the inline colormap + scalar-bar control.
+_SCALAR_KINDS = {"VECTOR FIELD", "CARIDDI J", "JOREK HDF5"}
+
+#: Per-kind badge tint for the scene-tree rows.
+_KIND_COLORS: dict[str, str] = {
+    "POINT CLOUD": "#e0533d",
+    "BOUNDARY": "#16a3a3",
+    "VTK": "#3d7be0",
+    "PATRAN": "#9b59b6",
+    "VECTOR FIELD": "#d4366b",
+    "WIRE": "#e08a2f",
+    "CARIDDI MESH": "#8e44ad",
+    "CARIDDI J": "#c0392b",
+    "JOREK HDF5": "#2f81f7",
+    "PROFILE": "#27ae60",
+}
+
+
+def _kind_badge(kind: str) -> QLabel:
+    """A small coloured pill showing the item kind."""
+    label = QLabel(kind)
+    tint = _KIND_COLORS.get(kind, "#5c6773")
+    label.setStyleSheet(
+        f"background-color: {tint}; color: white; font-weight: 600; "
+        "font-size: 10px; padding: 2px 7px; border-radius: 7px;"
+    )
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return label
+
+
 class _SceneRow(QWidget):
-    """Inline controls for one queued item: visibility / opacity / color / remove."""
+    """Inline controls for one queued item.
+
+    Top line: kind badge + summary + eye toggle + colour swatch + remove.
+    Second line: an opacity slider and (for scalar-coloured items) a colormap
+    picker and scalar-bar toggle.
+    """
 
     def __init__(
         self,
         item: ViewItem,
         on_update: Callable[[ViewItem], None],
         on_remove: Callable[[ViewItem], None],
+        on_scalar_change: Callable[[ViewItem], None] | None = None,
     ) -> None:
         super().__init__()
         self._item = item
         self._on_update = on_update
         self._on_remove = on_remove
+        self._on_scalar_change = on_scalar_change
         self._color = QColor(getattr(item, "color", "white") or "white")
+        self._visible_state = True
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 5, 6, 5)
+        outer.setSpacing(4)
 
-        self._visible = QCheckBox()
-        self._visible.setChecked(True)
-        self._visible.setToolTip("Visibility")
-        self._visible.stateChanged.connect(lambda _s: self._on_update(self._item))
-        layout.addWidget(self._visible)
+        # -- line 1: badge + summary + actions -------------------------------
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        top.addWidget(_kind_badge(item.kind))
 
-        text = QLabel(f"{item.kind}: {item.summary()}")
-        text.setToolTip(item.summary())
-        text.setWordWrap(False)
-        layout.addWidget(text, stretch=1)
+        summary = item.summary()
+        self._text = QLabel(item.label or summary)
+        self._text.setToolTip(summary)
+        self._text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        top.addWidget(self._text, stretch=1)
 
-        self._opacity = QDoubleSpinBox()
-        self._opacity.setRange(0.0, 1.0)
-        self._opacity.setSingleStep(0.05)
-        self._opacity.setValue(float(getattr(item, "opacity", 1.0) or 1.0))
-        self._opacity.setToolTip("Opacity")
-        self._opacity.valueChanged.connect(lambda _v: self._on_update(self._item))
-        layout.addWidget(self._opacity)
+        self._eye = QToolButton()
+        self._eye.setCheckable(True)
+        self._eye.setChecked(True)
+        self._eye.setAutoRaise(True)
+        self._eye.setToolTip("Toggle visibility")
+        self._eye.toggled.connect(self._on_eye_toggled)
+        self._refresh_eye()
+        top.addWidget(self._eye)
 
-        self._color_btn = QPushButton("color")
-        self._color_btn.setToolTip("Color")
+        self._color_btn = QToolButton()
+        self._color_btn.setAutoRaise(True)
+        self._color_btn.setToolTip("Pick colour")
         self._color_btn.clicked.connect(self._pick_color)
         self._refresh_color_btn()
-        layout.addWidget(self._color_btn)
+        top.addWidget(self._color_btn)
 
-        remove = QPushButton("✕")
-        remove.setFixedWidth(28)
-        remove.setToolTip("Remove")
+        remove = QToolButton()
+        remove.setText("✕")
+        remove.setAutoRaise(True)
+        remove.setToolTip("Remove from scene")
         remove.clicked.connect(lambda: self._on_remove(self._item))
-        layout.addWidget(remove)
+        top.addWidget(remove)
+        outer.addLayout(top)
+
+        # -- line 2: opacity (+ optional colormap / scalar bar) --------------
+        bottom = QHBoxLayout()
+        bottom.setSpacing(6)
+        op_label = QLabel("Opacity")
+        op_label.setStyleSheet("color: palette(mid);")
+        bottom.addWidget(op_label)
+
+        self._opacity = QSlider(Qt.Orientation.Horizontal)
+        self._opacity.setRange(0, 100)
+        self._opacity.setValue(int(float(getattr(item, "opacity", 1.0) or 1.0) * 100))
+        self._opacity.setToolTip("Opacity")
+        self._opacity.valueChanged.connect(lambda _v: self._on_update(self._item))
+        bottom.addWidget(self._opacity, stretch=1)
+
+        self._cmap: QComboBox | None = None
+        self._bar_btn: QToolButton | None = None
+        if item.kind in _SCALAR_KINDS:
+            self._cmap = QComboBox()
+            self._cmap.addItems(list(COLORMAPS))
+            current = str(getattr(item, "colormap", "viridis") or "viridis")
+            if current in COLORMAPS:
+                self._cmap.setCurrentText(current)
+            self._cmap.setToolTip("Colormap")
+            self._cmap.setMinimumWidth(96)
+            self._cmap.currentTextChanged.connect(self._emit_scalar)
+            bottom.addWidget(self._cmap)
+
+            self._bar_btn = QToolButton()
+            self._bar_btn.setText("Bar")
+            self._bar_btn.setCheckable(True)
+            self._bar_btn.setChecked(True)
+            self._bar_btn.setToolTip("Toggle scalar (colour) bar")
+            self._bar_btn.toggled.connect(self._emit_scalar)
+            bottom.addWidget(self._bar_btn)
+
+        outer.addLayout(bottom)
 
     @property
     def item(self) -> ViewItem:
         return self._item
 
+    # -- visuals -------------------------------------------------------------
+
+    def _refresh_eye(self) -> None:
+        self._eye.setText("👁" if self._eye.isChecked() else "🚫")
+
     def _refresh_color_btn(self) -> None:
-        self._color_btn.setStyleSheet(f"background-color: {self._color.name()};")
+        self._color_btn.setIcon(swatch_icon(self._color))
+
+    def _on_eye_toggled(self, _checked: bool) -> None:
+        self._visible_state = self._eye.isChecked()
+        self._refresh_eye()
+        self._on_update(self._item)
 
     def _pick_color(self) -> None:
-        chosen = QColorDialog.getColor(self._color, self, "Pick color")
+        chosen = QColorDialog.getColor(self._color, self, "Pick colour")
         if chosen.isValid():
             self._color = chosen
             self._refresh_color_btn()
             self._on_update(self._item)
 
+    def _emit_scalar(self, *_a: object) -> None:
+        if self._on_scalar_change is not None:
+            self._on_scalar_change(self._item)
+
     # -- read current control state -----------------------------------------
 
     @property
     def visible(self) -> bool:
-        return self._visible.isChecked()
+        return self._eye.isChecked()
 
     @property
     def opacity(self) -> float:
-        return self._opacity.value()
+        return self._opacity.value() / 100.0
 
     @property
     def color_rgb(self) -> tuple[float, float, float]:
         return (self._color.redF(), self._color.greenF(), self._color.blueF())
+
+    @property
+    def colormap(self) -> str | None:
+        return self._cmap.currentText() if self._cmap is not None else None
+
+    @property
+    def scalar_bar(self) -> bool:
+        return self._bar_btn.isChecked() if self._bar_btn is not None else False
 
 
 # --------------------------------------------------------------------------- #
@@ -198,7 +316,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.data_dir = data_dir or _project_root() / "data"
         self.setWindowTitle(f"OmniViz {__version__}")
-        self.resize(1280, 820)
+        self.resize(1440, 900)
+        self.setMinimumSize(960, 640)
+        self.setDockOptions(
+            QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowTabbedDocks
+        )
+        self._theme_mode = "dark"
 
         self._items: list[ViewItem] = []
         self._categories = categorize_files_qt(self.data_dir)
@@ -244,10 +367,48 @@ class MainWindow(QMainWindow):
             log.warning("QtInteractor unavailable; running without the 3D view", exc_info=True)
             return None
 
+    def _build_header(self) -> QWidget:
+        """A polished header strip: logo + title + subtitle."""
+        header = QFrame()
+        header.setObjectName("OmniVizHeader")
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(10)
+
+        if LOGO_PATH.is_file():
+            logo = QLabel()
+            pix = QPixmap(str(LOGO_PATH))
+            if not pix.isNull():
+                logo.setPixmap(pix.scaledToHeight(40, Qt.TransformationMode.SmoothTransformation))
+            layout.addWidget(logo)
+
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        title = QLabel("OmniViz")
+        title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        subtitle = QLabel(f"CARIDDI / JOREK visualization · v{__version__}")
+        subtitle.setStyleSheet("font-size: 11px; color: palette(mid);")
+        text.addWidget(title)
+        text.addWidget(subtitle)
+        layout.addLayout(text)
+        layout.addStretch(1)
+        return header
+
     def _build_left_dock(self) -> None:
         dock = QDockWidget("Data sources", self)
-        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea)
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        col.addWidget(self._build_header())
+
         self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        col.addWidget(self._tabs, stretch=1)
 
         self._panels: dict[str, object] = {}
         cats = self._categories
@@ -267,29 +428,64 @@ class MainWindow(QMainWindow):
             files = cats.get(key, []) if key else []
             panel = cls(on_add=self._add_item, files=files)
             self._panels[name] = panel
-            self._tabs.addTab(panel, name)
+            # Wrap each panel so tall option forms scroll cleanly.
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(panel)
+            self._tabs.addTab(scroll, name)
 
-        dock.setWidget(self._tabs)
+        dock.setWidget(container)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        self._left_dock = dock
 
     def _build_right_dock(self) -> None:
         dock = QDockWidget("Scene tree", self)
-        dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea
+        )
 
         container = QWidget()
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # -- header row
+        header = QLabel("SCENE ITEMS")
+        header.setStyleSheet("font-weight: 700; font-size: 11px; color: palette(mid);")
+        layout.addWidget(header)
 
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.setRootIsDecorated(False)
-        layout.addWidget(self._tree)
+        self._tree.setUniformRowHeights(False)
+        self._tree.setIndentation(0)
+        self._tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
+        layout.addWidget(self._tree, stretch=1)
+
+        # -- empty-state placeholder (overlaps the tree area)
+        self._empty_label = QLabel("No items yet —\nadd from the panels on the left.")
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setStyleSheet("color: palette(mid); font-style: italic;")
+        layout.addWidget(self._empty_label)
 
         clear_btn = QPushButton("Clear all")
+        clear_btn.setToolTip("Remove every item from the scene")
         clear_btn.clicked.connect(self._clear_items)
         layout.addWidget(clear_btn)
 
         dock.setWidget(container)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._right_dock = dock
+        self.resizeDocks([self._left_dock, self._right_dock], [340, 320], Qt.Orientation.Horizontal)
+        self._refresh_empty_state()
+
+    def _refresh_empty_state(self) -> None:
+        """Show the placeholder only when no items are queued."""
+        empty = self._tree.topLevelItemCount() == 0
+        self._empty_label.setVisible(empty)
+        self._tree.setVisible(not empty)
 
     def _build_status_bar(self) -> None:
         self._log_label = QLabel("")
@@ -299,18 +495,22 @@ class MainWindow(QMainWindow):
     def _build_menus_and_toolbar(self) -> None:
         menubar = self.menuBar()
         toolbar = self.addToolBar("Main")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
 
-        # -- Views menu + toolbar
+        # -- Views menu + toolbar (text-under-badge icons)
         view_menu = menubar.addMenu("&Views")
-        for label, name, key in (
-            ("View X", "x", "x"),
-            ("View Y", "y", "y"),
-            ("View Z", "z", "z"),
-            ("Isometric", "iso", "i"),
-            ("Flip", "flip", "f"),
+        for label, short, name, key, tip in (
+            ("View X", "X", "x", "x", "Look down +X (Y-Z plane)"),
+            ("View Y", "Y", "y", "y", "Look down +Y (X-Z plane)"),
+            ("View Z", "Z", "z", "z", "Look down +Z (X-Y plane)"),
+            ("Isometric", "ISO", "iso", "i", "Isometric view"),
+            ("Flip", "FLIP", "flip", "f", "Flip 180° to the far side"),
         ):
-            act = QAction(label, self)
+            act = QAction(badge_icon(short), short, self)
             act.setShortcut(QKeySequence(key))
+            act.setToolTip(f"{label}  ({key.upper()}) — {tip}")
             act.triggered.connect(lambda _checked=False, n=name: self._set_view(n))
             view_menu.addAction(act)
             toolbar.addAction(act)
@@ -318,44 +518,94 @@ class MainWindow(QMainWindow):
 
         # -- Toggles menu
         toggles = menubar.addMenu("&Toggles")
-        self._axes_action = QAction("Axes", self, checkable=True)
+        self._axes_action = QAction(standard_icon("SP_FileDialogDetailedView"), "Axes", self)
+        self._axes_action.setCheckable(True)
+        self._axes_action.setToolTip("Show/hide the orientation axes")
         self._axes_action.triggered.connect(self._toggle_axes)
         toggles.addAction(self._axes_action)
         toolbar.addAction(self._axes_action)
 
-        self._bounds_action = QAction("Bounds grid", self, checkable=True)
+        self._bounds_action = QAction(standard_icon("SP_FileDialogListView"), "Grid", self)
+        self._bounds_action.setCheckable(True)
+        self._bounds_action.setToolTip("Show/hide the bounds grid")
         self._bounds_action.triggered.connect(self._toggle_bounds)
         toggles.addAction(self._bounds_action)
         toolbar.addAction(self._bounds_action)
 
-        bg_action = QAction("Background…", self)
+        bg_action = QAction(standard_icon("SP_DialogResetButton"), "Background…", self)
+        bg_action.setToolTip("Pick the 3D background colour")
         bg_action.triggered.connect(self._pick_background)
         toggles.addAction(bg_action)
 
-        self._clip_action = QAction("Clip plane", self, checkable=True)
+        self._clip_action = QAction(standard_icon("SP_DialogDiscardButton"), "Clip", self)
+        self._clip_action.setCheckable(True)
+        self._clip_action.setToolTip("Toggle an interactive clip plane")
         self._clip_action.triggered.connect(self._toggle_clip)
         toggles.addAction(self._clip_action)
         toolbar.addAction(self._clip_action)
+        toolbar.addSeparator()
 
         # -- File menu
         file_menu = menubar.addMenu("&File")
-        import_action = QAction("Import file…", self)
+        import_action = QAction(standard_icon("SP_DialogOpenButton"), "Import", self)
+        import_action.setToolTip("Import a file into the data folder")
         import_action.triggered.connect(self._import_file)
         file_menu.addAction(import_action)
         toolbar.addAction(import_action)
 
-        reload_action = QAction("Reload files", self)
+        reload_action = QAction(standard_icon("SP_BrowserReload"), "Reload files", self)
+        reload_action.setToolTip("Re-scan the data folder")
         reload_action.triggered.connect(self._reload_files)
         file_menu.addAction(reload_action)
+        toolbar.addAction(reload_action)
 
         reload_scene_action = QAction("Reload scene (re-apply from disk)", self)
+        reload_scene_action.setToolTip("Clear and rebuild every queued item from disk")
         reload_scene_action.triggered.connect(self._reload_scene)
         file_menu.addAction(reload_scene_action)
 
-        screenshot_action = QAction("Screenshot / Export…", self)
+        screenshot_action = QAction(standard_icon("SP_DialogSaveButton"), "Export", self)
+        screenshot_action.setToolTip("Capture a high-res screenshot / export")
         screenshot_action.triggered.connect(self._export_screenshot)
         file_menu.addAction(screenshot_action)
         toolbar.addAction(screenshot_action)
+
+        # -- View menu (appearance) + toolbar spacer + theme toggle
+        appearance = menubar.addMenu("&Appearance")
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        self._dark_action = QAction("Dark", self, checkable=True)
+        self._dark_action.setChecked(True)
+        self._dark_action.triggered.connect(lambda: self._set_theme("dark"))
+        self._light_action = QAction("Light", self, checkable=True)
+        self._light_action.triggered.connect(lambda: self._set_theme("light"))
+        for act in (self._dark_action, self._light_action):
+            self._theme_group.addAction(act)
+            appearance.addAction(act)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+
+        self._theme_action = QAction(standard_icon("SP_DesktopIcon"), "Theme", self)
+        self._theme_action.setToolTip("Switch between Dark and Light appearance")
+        self._theme_action.triggered.connect(self._cycle_theme)
+        toolbar.addAction(self._theme_action)
+
+    # ----------------------------------------------------------------- theme
+
+    def _set_theme(self, mode: str) -> None:
+        """Apply a theme live to the running application."""
+        self._theme_mode = mode
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, mode)
+        self._dark_action.setChecked(mode == "dark")
+        self._light_action.setChecked(mode == "light")
+        self._log(f"Theme: {mode}")
+
+    def _cycle_theme(self) -> None:
+        self._set_theme("light" if self._theme_mode == "dark" else "dark")
 
     def _bind_shortcuts(self) -> None:
         # Shortcuts are also on the view actions, but bind them explicitly so
@@ -408,6 +658,7 @@ class MainWindow(QMainWindow):
         self.plotter.render()
         self._items.clear()
         self._tree.clear()
+        self._refresh_empty_state()
         if self._profile_ax is not None:
             self._profile_ax.clear()
             self._profile_canvas.draw_idle()
@@ -427,10 +678,17 @@ class MainWindow(QMainWindow):
 
     def _add_tree_row(self, item: ViewItem) -> None:
         node = QTreeWidgetItem(self._tree)
-        row = _SceneRow(item, self._on_row_changed, self._remove_item)
+        row = _SceneRow(
+            item,
+            self._on_row_changed,
+            self._remove_item,
+            on_scalar_change=self._on_scalar_changed,
+        )
         node.setData(0, Qt.ItemDataRole.UserRole, item.id)
         self._tree.addTopLevelItem(node)
         self._tree.setItemWidget(node, 0, row)
+        node.setSizeHint(0, row.sizeHint())
+        self._refresh_empty_state()
 
     def _find_tree_node(self, item: ViewItem) -> tuple[QTreeWidgetItem | None, _SceneRow | None]:
         for i in range(self._tree.topLevelItemCount()):
@@ -444,6 +702,7 @@ class MainWindow(QMainWindow):
         node, _row = self._find_tree_node(item)
         if node is not None:
             self._tree.takeTopLevelItem(self._tree.indexOfTopLevelItem(node))
+        self._refresh_empty_state()
 
     def _on_row_changed(self, item: ViewItem) -> None:
         if isinstance(item, ProfileItem):
@@ -461,6 +720,63 @@ class MainWindow(QMainWindow):
             opacity=row.opacity,
             visibility=row.visible,
         )
+
+    def _on_scalar_changed(self, item: ViewItem) -> None:
+        """Live-update colormap / scalar-bar for a scalar-coloured item.
+
+        Wires directly to the embedded actors' mappers (the plotter exposes the
+        actor handles via ``_actors``); no plotter.py logic is changed.
+        """
+        _node, row = self._find_tree_node(item)
+        if row is None:
+            return
+        cmap = row.colormap
+        show_bar = row.scalar_bar
+        handles = self.plotter._actors.get(item.id, [])
+        applied = False
+        for handle in handles:
+            mapper = getattr(handle, "mapper", None)
+            if mapper is None:
+                continue
+            try:
+                if cmap is not None:
+                    # Rebuild the lookup table with the chosen colormap while
+                    # preserving the existing scalar range.
+                    import pyvista as pv
+
+                    rng = None
+                    lut = getattr(mapper, "lookup_table", None)
+                    if lut is not None and hasattr(lut, "scalar_range"):
+                        rng = lut.scalar_range
+                    new_lut = pv.LookupTable(cmap=cmap)
+                    if rng is not None:
+                        new_lut.scalar_range = rng
+                    mapper.lookup_table = new_lut
+                    applied = True
+            except Exception:  # noqa: BLE001
+                log.debug("Colormap update failed for %s", item.id, exc_info=True)
+        self._toggle_scalar_bar(item, show_bar)
+        if applied:
+            self.plotter.render()
+        self._log(f"{item.label}: cmap={cmap}, scalar bar={'on' if show_bar else 'off'}")
+
+    def _toggle_scalar_bar(self, item: ViewItem, show: bool) -> None:
+        """Best-effort show/hide of the scalar bar for ``item``'s actor."""
+        p = self.plotter.plotter
+        title = item.label or item.kind
+        try:
+            if show:
+                handles = self.plotter._actors.get(item.id, [])
+                mapper = next(
+                    (getattr(h, "mapper", None) for h in handles if getattr(h, "mapper", None)),
+                    None,
+                )
+                if mapper is not None:
+                    p.add_scalar_bar(title=title, mapper=mapper)
+            else:
+                p.remove_scalar_bar(title=title)
+        except Exception:  # noqa: BLE001
+            log.debug("Scalar-bar toggle failed for %s", item.id, exc_info=True)
 
     # ----------------------------------------------------------------- views
 
@@ -756,6 +1072,7 @@ def run(data_dir: str | Path | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     app = QApplication.instance() or QApplication([])
+    apply_theme(app, "dark")
     if LOGO_PATH.is_file():
         app.setWindowIcon(QIcon(str(LOGO_PATH)))
 
