@@ -457,10 +457,13 @@ class MainWindow(QMainWindow):
         self._axes_on = False
         self._bounds_on = False
 
-        # -- clip-plane state
+        # -- clip-plane state (per-actor clipping that preserves each colour)
         self._clip_item: _ClipPlaneItem | None = None
-        self._clip_actor = None
-        self._clip_hidden_ids: list[str] = []
+        self._clip_sources: list[tuple[object, object]] = []  # (actor, original dataset)
+        self._clip_widget = None
+        self._clip_params: tuple | None = None  # (normal, origin), persisted across rebuilds
+        self._clip_invert = False
+        self._clip_handle_visible = True
 
         # -- background render state (kept referenced so threads/dialogs survive)
         self._render_threads: list[_RenderWorker] = []
@@ -802,7 +805,7 @@ class MainWindow(QMainWindow):
     def _clear_items(self) -> None:
         # Drop the clip widget first so it doesn't dangle over a cleared scene.
         if self._clip_item is not None:
-            self._teardown_clip_widget()
+            self._teardown_clip()
             self._clip_item = None
             self._clip_action.setChecked(False)
         self.plotter.clear_items()
@@ -868,14 +871,11 @@ class MainWindow(QMainWindow):
         if isinstance(item, ProfileItem):
             return
         if item is self._clip_item:
-            # The clip row's eye shows/hides the clip widget+actor.
+            # The clip row's eye shows/hides the interactive plane handle while
+            # the clip itself stays applied.
             _node, row = self._find_tree_node(item)
-            if row is not None and self._clip_actor is not None:
-                try:
-                    self._clip_actor.SetVisibility(row.visible)
-                    self.plotter.render()
-                except Exception:  # noqa: BLE001
-                    log.debug("clip visibility toggle failed", exc_info=True)
+            if row is not None:
+                self._set_clip_handle_visible(row.visible)
             return
         self._apply_row_state(item)
 
@@ -1009,6 +1009,22 @@ class MainWindow(QMainWindow):
                 continue
         return None
 
+    @staticmethod
+    def _set_actor_dataset(handle, dataset) -> None:
+        """Swap the geometry behind an actor while keeping its colour/scalars."""
+        mapper = getattr(handle, "mapper", None)
+        if mapper is None:
+            return
+        try:
+            mapper.dataset = dataset
+            return
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            mapper.SetInputData(dataset)
+        except Exception:  # noqa: BLE001
+            log.debug("set actor dataset failed", exc_info=True)
+
     def _toggle_clip(self) -> None:
         """Enable/disable the interactive clip plane from the toolbar toggle."""
         if self._clip_action.isChecked():
@@ -1023,7 +1039,7 @@ class MainWindow(QMainWindow):
         self._clip_item = _ClipPlaneItem()
         self._items.append(self._clip_item)
         self._add_tree_row(self._clip_item)
-        if not self._rebuild_clip():
+        if not self._install_clip():
             # Nothing to clip — roll the row/item back out.
             self._remove_tree_row(self._clip_item)
             if self._clip_item in self._items:
@@ -1035,12 +1051,12 @@ class MainWindow(QMainWindow):
             return
         self._clip_action.setChecked(True)
         self._update_status()
-        self._log("Clip plane enabled — drag the handle in the view")
-        self.plotter.render()
+        self._log("Clip enabled — drag the handle; the row 👁 hides it, ✕ turns it off")
 
     def _disable_clip(self) -> None:
-        """Tear down the clip plane and restore the original actors."""
-        self._teardown_clip_widget()
+        """Tear down the clip plane and restore the original (unclipped) actors."""
+        self._teardown_clip()
+        self._clip_params = None
         if self._clip_item is not None:
             self._remove_tree_row(self._clip_item)
             if self._clip_item in self._items:
@@ -1049,72 +1065,106 @@ class MainWindow(QMainWindow):
         self._clip_action.setChecked(False)
         self._update_status()
         self.plotter.render()
-        self._log("Clip plane disabled")
+        self._log("Clip disabled")
 
-    def _teardown_clip_widget(self) -> None:
-        """Remove the clip widget/actor and un-hide the clipped originals."""
-        p = self.plotter.plotter
+    def _teardown_clip(self) -> None:
+        """Remove the plane widget and restore each actor's full geometry."""
         try:
-            p.clear_plane_widgets()
+            self.plotter.plotter.clear_plane_widgets()
         except Exception:  # noqa: BLE001
             log.debug("clear_plane_widgets failed", exc_info=True)
-        if self._clip_actor is not None:
-            try:
-                p.remove_actor(self._clip_actor)
-            except Exception:  # noqa: BLE001
-                log.debug("remove clip actor failed", exc_info=True)
-            self._clip_actor = None
-        for item_id in self._clip_hidden_ids:
-            for handle in self.plotter._actors.get(item_id, []):
-                try:
-                    handle.SetVisibility(True)
-                except Exception:  # noqa: BLE001
-                    log.debug("restore visibility failed", exc_info=True)
-        self._clip_hidden_ids = []
+        self._clip_widget = None
+        for handle, orig in self._clip_sources:
+            self._set_actor_dataset(handle, orig)
+        self._clip_sources = []
 
-    def _rebuild_clip(self) -> bool:
-        """(Re)build the clipped union from the current data actors.
+    def _install_clip(self) -> bool:
+        """Attach ONE interactive clip plane that clips every data actor in place.
 
-        Hides the original data actors and shows one interactive clip plane over
-        their merged geometry, so the clip visibly affects the whole scene and
-        stays correct when items are added/removed while clip is active.
+        Each actor keeps its own colour / colormap because we only swap the
+        geometry behind it (to ``dataset.clip(...)``), never its mapper styling.
         """
-        import pyvista as pv
-
-        self._teardown_clip_widget()
-        blocks = []
-        hidden: list[str] = []
-        for item_id, handles in self.plotter._actors.items():
-            datasets = [ds for h in handles if (ds := self._actor_dataset(h)) is not None]
-            if not datasets:
-                continue
-            blocks.extend(datasets)
+        self._teardown_clip()
+        sources: list[tuple[object, object]] = []
+        bounds: tuple[float, ...] | None = None
+        for handles in self.plotter._actors.values():
             for handle in handles:
-                try:
-                    handle.SetVisibility(False)
-                except Exception:  # noqa: BLE001
-                    log.debug("hide actor failed", exc_info=True)
-            hidden.append(item_id)
-        if not blocks:
+                ds = self._actor_dataset(handle)
+                if ds is None or not hasattr(ds, "clip"):
+                    continue
+                sources.append((handle, ds))
+                b = getattr(ds, "bounds", None)
+                if b is not None:
+                    bounds = (
+                        b
+                        if bounds is None
+                        else (
+                            min(bounds[0], b[0]),
+                            max(bounds[1], b[1]),
+                            min(bounds[2], b[2]),
+                            max(bounds[3], b[3]),
+                            min(bounds[4], b[4]),
+                            max(bounds[5], b[5]),
+                        )
+                    )
+        if not sources:
             return False
+        self._clip_sources = sources
+
+        if self._clip_params is not None:
+            normal, origin = self._clip_params
+        else:
+            normal = (1.0, 0.0, 0.0)
+            origin = (
+                (
+                    (bounds[0] + bounds[1]) / 2.0,
+                    (bounds[2] + bounds[3]) / 2.0,
+                    (bounds[4] + bounds[5]) / 2.0,
+                )
+                if bounds is not None
+                else (0.0, 0.0, 0.0)
+            )
         try:
-            union = pv.MultiBlock(blocks).combine()
-            self._clip_actor = self.plotter.plotter.add_mesh_clip_plane(
-                union, name="__omniviz_clip__"
+            self._clip_widget = self.plotter.plotter.add_plane_widget(
+                self._clip_callback, normal=normal, origin=origin, bounds=bounds, implicit=True
             )
         except Exception as exc:  # noqa: BLE001
-            log.debug("add_mesh_clip_plane failed", exc_info=True)
+            log.debug("add_plane_widget failed", exc_info=True)
             self._log(f"Clip unavailable: {exc}")
-            # Un-hide on failure.
-            for item_id in hidden:
-                for handle in self.plotter._actors.get(item_id, []):
-                    try:
-                        handle.SetVisibility(True)
-                    except Exception:  # noqa: BLE001
-                        pass
             return False
-        self._clip_hidden_ids = hidden
+        self._clip_callback(normal, origin)
+        self._set_clip_handle_visible(self._clip_handle_visible)
         return True
+
+    def _clip_callback(self, normal, origin) -> None:
+        """Plane-widget callback: clip every source actor by the current plane."""
+        self._clip_params = (tuple(normal), tuple(origin))
+        for handle, orig in self._clip_sources:
+            try:
+                clipped = orig.clip(normal=normal, origin=origin, invert=self._clip_invert)
+                self._set_actor_dataset(handle, clipped)
+            except Exception:  # noqa: BLE001
+                log.debug("clip apply failed", exc_info=True)
+        self.plotter.render()
+
+    def _rebuild_clip(self) -> bool:
+        """Re-collect actors and re-apply the clip after the scene set changes."""
+        return self._install_clip()
+
+    def _set_clip_handle_visible(self, show: bool) -> None:
+        """Show/hide the interactive plane handle; the clip itself stays applied."""
+        self._clip_handle_visible = show
+        widget = self._clip_widget
+        if widget is None:
+            return
+        try:
+            widget.On() if show else widget.Off()
+        except Exception:  # noqa: BLE001
+            try:
+                widget.SetEnabled(1 if show else 0)
+            except Exception:  # noqa: BLE001
+                log.debug("clip handle toggle failed", exc_info=True)
+        self.plotter.render()
 
     # ----------------------------------------------------------------- profile
 
@@ -1241,7 +1291,7 @@ class MainWindow(QMainWindow):
         """Clear the live scene and re-apply every queued item from disk."""
         items = list(self._items)
         clip_was_active = self._clip_item is not None
-        self._teardown_clip_widget()
+        self._teardown_clip()
         self.plotter.clear_items()
         self.plotter.render()
         if self._profile_ax is not None:
