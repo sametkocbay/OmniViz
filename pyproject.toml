@@ -42,7 +42,7 @@ jorek = [
 ]
 
 [project.scripts]
-omniviz = "omniviz.gui.app:run"
+omniviz = "omniviz.gui.main_window:run"
 
 [project.urls]
 Homepage = "https://github.com/sametkocbay/OmniViz"
