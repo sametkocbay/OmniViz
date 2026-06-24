@@ -77,7 +77,7 @@ from omniviz.gui.qt_panels import (  # noqa: E402
 from omniviz.gui.qt_style import apply_theme, viz_background  # noqa: E402
 from omniviz.gui.theme import COLORMAPS  # noqa: E402
 from omniviz.models import ProfileItem, ViewItem  # noqa: E402
-from omniviz.plotter import UnifiedPlotter  # noqa: E402
+from omniviz.plotter import UnifiedPlotter, min_distance_between  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -137,12 +137,14 @@ class _SceneRow(QWidget):
         on_update: Callable[[ViewItem], None],
         on_remove: Callable[[ViewItem], None],
         on_scalar_change: Callable[[ViewItem], None] | None = None,
+        on_select: Callable[[ViewItem, Qt.KeyboardModifiers], None] | None = None,
     ) -> None:
         super().__init__()
         self._item = item
         self._on_update = on_update
         self._on_remove = on_remove
         self._on_scalar_change = on_scalar_change
+        self._on_select = on_select
         self._color = QColor(getattr(item, "color", "white") or "white")
         self._visible_state = True
 
@@ -225,6 +227,17 @@ class _SceneRow(QWidget):
     @property
     def item(self) -> ViewItem:
         return self._item
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        # Clicks on the eye/colour/remove child buttons are consumed by them;
+        # a press that reaches the row itself means "select this item".
+        if self._on_select is not None:
+            self._on_select(self._item, event.modifiers())
+        super().mousePressEvent(event)
+
+    def set_selected(self, selected: bool) -> None:
+        """Visually mark the row as part of the current selection."""
+        self.setStyleSheet("background: palette(highlight);" if selected else "")
 
     # -- visuals -------------------------------------------------------------
 
@@ -437,6 +450,7 @@ class MainWindow(QMainWindow):
         self._theme_mode = "dark"
 
         self._items: list[ViewItem] = []
+        self._min_dist_line = None  # actor for the latest min-distance marker
         self._categories = categorize_files_qt(self.data_dir)
         self._last_import_dir = self.data_dir if self.data_dir.exists() else Path.home()
 
@@ -586,7 +600,8 @@ class MainWindow(QMainWindow):
         self._tree.setRootIsDecorated(False)
         self._tree.setUniformRowHeights(False)
         self._tree.setIndentation(0)
-        self._tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
+        self._tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self._tree.itemSelectionChanged.connect(self._sync_row_selection)
         layout.addWidget(self._tree, stretch=1)
 
         # -- empty-state placeholder (overlaps the tree area)
@@ -669,6 +684,17 @@ class MainWindow(QMainWindow):
         self._clip_action.triggered.connect(self._toggle_clip)
         toggles.addAction(self._clip_action)
         toolbar.addAction(self._clip_action)
+        toolbar.addSeparator()
+
+        # -- Tools menu
+        tools = menubar.addMenu("Too&ls")
+        self._min_dist_action = QAction(badge_icon("MIN"), "Min Dist", self)
+        self._min_dist_action.setToolTip(
+            "Minimum distance between two selected scene items (select two rows in the right panel)"
+        )
+        self._min_dist_action.triggered.connect(self._compute_min_distance)
+        tools.addAction(self._min_dist_action)
+        toolbar.addAction(self._min_dist_action)
         toolbar.addSeparator()
 
         # -- File menu
@@ -846,6 +872,7 @@ class MainWindow(QMainWindow):
             self._on_row_changed,
             self._remove_item,
             on_scalar_change=self._on_scalar_changed,
+            on_select=self._select_row,
         )
         node.setData(0, Qt.ItemDataRole.UserRole, item.id)
         self._tree.addTopLevelItem(node)
@@ -860,6 +887,33 @@ class MainWindow(QMainWindow):
                 widget = self._tree.itemWidget(node, 0)
                 return node, widget if isinstance(widget, _SceneRow) else None
         return None, None
+
+    def _select_row(self, item: ViewItem, modifiers: Qt.KeyboardModifiers) -> None:
+        """Select the row for ``item`` (additive when Ctrl/Shift is held)."""
+        node, _row = self._find_tree_node(item)
+        if node is None:
+            return
+        additive = bool(
+            modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        )
+        if additive:
+            node.setSelected(not node.isSelected())
+        else:
+            self._tree.clearSelection()
+            node.setSelected(True)
+
+    def _sync_row_selection(self) -> None:
+        """Mirror the tree's selection state onto the custom row widgets."""
+        for i in range(self._tree.topLevelItemCount()):
+            node = self._tree.topLevelItem(i)
+            widget = self._tree.itemWidget(node, 0)
+            if isinstance(widget, _SceneRow):
+                widget.set_selected(node.isSelected())
+
+    def _selected_items(self) -> list[ViewItem]:
+        """The `ViewItem`s whose rows are currently selected, in tree order."""
+        ids = {node.data(0, Qt.ItemDataRole.UserRole) for node in self._tree.selectedItems()}
+        return [it for it in self._items if it.id in ids]
 
     def _remove_tree_row(self, item: ViewItem) -> None:
         node, _row = self._find_tree_node(item)
@@ -990,6 +1044,77 @@ class MainWindow(QMainWindow):
                 self.plotter.render()
             except Exception:  # noqa: BLE001
                 log.debug("Background change failed", exc_info=True)
+
+    # ------------------------------------------------------------ min distance
+
+    def _item_geometry(self, item: ViewItem):
+        """Combine every actor dataset for ``item`` into one pyvista mesh."""
+        import pyvista as pv
+
+        parts = []
+        for handle in self.plotter._actors.get(item.id, []):
+            ds = self._actor_dataset(handle)
+            if ds is not None and getattr(ds, "n_points", 0) > 0:
+                parts.append(pv.wrap(ds))
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        return pv.MultiBlock(parts).combine()
+
+    def _compute_min_distance(self) -> None:
+        """Report the minimum distance between the two selected scene items."""
+        selected = self._selected_items()
+        if len(selected) != 2:
+            QMessageBox.information(
+                self,
+                "Minimum distance",
+                "Select exactly two items in the scene panel "
+                "(Ctrl/Shift-click to pick a second), then run Min Dist.",
+            )
+            return
+
+        a, b = selected
+        geom_a = self._item_geometry(a)
+        geom_b = self._item_geometry(b)
+        if geom_a is None or geom_b is None:
+            QMessageBox.warning(
+                self,
+                "Minimum distance",
+                "Could not read geometry for one of the selected items.",
+            )
+            return
+
+        try:
+            dist, pa, pb = min_distance_between(geom_a, geom_b)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Min-distance computation failed", exc_info=True)
+            QMessageBox.warning(self, "Minimum distance", f"Computation failed: {exc}")
+            return
+
+        self._draw_min_distance_line(pa, pb)
+        msg = f"{a.label or a.kind} ↔ {b.label or b.kind}:  {dist:.6g} m"
+        self.statusBar().showMessage(msg, 15000)
+        self._log(msg)
+        QMessageBox.information(self, "Minimum distance", msg)
+
+    def _draw_min_distance_line(self, pa, pb) -> None:
+        """Draw (replacing any previous) a marker line between the closest points."""
+        import pyvista as pv
+
+        p = self.plotter.plotter
+        try:
+            if self._min_dist_line is not None:
+                p.remove_actor(self._min_dist_line)
+            self._min_dist_line = p.add_mesh(
+                pv.Line(pa, pb),
+                color="yellow",
+                line_width=4,
+                name="__min_distance__",
+            )
+            self.plotter.render()
+        except Exception:  # noqa: BLE001
+            log.debug("Min-distance line draw failed", exc_info=True)
 
     @staticmethod
     def _actor_dataset(handle):

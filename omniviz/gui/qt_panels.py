@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Generic, TypeVar
 
 from qtpy.QtCore import Qt
+from qtpy.QtGui import QDoubleValidator
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -165,6 +166,16 @@ def _opacity_spin(default: float) -> QDoubleSpinBox:
     spin.setSingleStep(0.05)
     spin.setValue(default)
     return spin
+
+
+def _float_line_edit(default: str) -> QLineEdit:
+    """A line edit that only accepts plain decimal numbers (no ``e`` exponent)."""
+    le = QLineEdit(default)
+    validator = QDoubleValidator(le)
+    validator.setNotation(QDoubleValidator.Notation.StandardNotation)  # forbid '1e5' input
+    validator.setDecimals(15)  # keep full precision for physics values
+    le.setValidator(validator)
+    return le
 
 
 # --------------------------------------------------------------------------- #
@@ -401,15 +412,15 @@ class WirePanel(BasePanel[WireItem]):
         return False
 
     def _build_options(self, form: QFormLayout) -> None:
-        self._r0 = QLineEdit("1.99141779000833")
+        self._r0 = _float_line_edit("1.99141779000833")
         form.addRow("r0 (major radius) [m]", self._r0)
-        self._z0 = QLineEdit("0.0")
+        self._z0 = _float_line_edit("0.0")
         form.addRow("z0 (axial pos) [m]", self._z0)
-        self._alfa = QLineEdit("3.0")
+        self._alfa = _float_line_edit("3.0")
         form.addRow("alfa_wire [deg]", self._alfa)
         self._color = _color_combo("orange")
         form.addRow("Color", self._color)
-        self._tube = QLineEdit("0.0")
+        self._tube = _float_line_edit("0.0")
         form.addRow("Tube radius [m]", self._tube)
         self._label = QLineEdit()
         self._label.setPlaceholderText("Wire")

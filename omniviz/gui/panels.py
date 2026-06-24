@@ -455,7 +455,7 @@ def categorize_files(data_dir: Path) -> dict[str, list[str]]:
         name = path.name
         if name.startswith("."):
             continue
-        if name == "boundary.txt":
+        if name.endswith(".txt") and name.startswith("boundary"):
             categories["boundary"].append(name)
         elif name.endswith(".vtk"):
             categories["vtk"].append(name)

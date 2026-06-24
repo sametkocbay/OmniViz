@@ -19,7 +19,7 @@ import pyvista as pv  # noqa: E402
 
 pv.OFF_SCREEN = True
 
-from omniviz.plotter import UnifiedPlotter  # noqa: E402
+from omniviz.plotter import UnifiedPlotter, min_distance_between  # noqa: E402
 
 
 @pytest.fixture
@@ -61,6 +61,28 @@ def test_clear_items(plotter: UnifiedPlotter) -> None:
 
     plotter.clear_items()
     assert plotter._actors == {}
+
+
+def test_min_distance_point_to_surface() -> None:
+    # A plane at z=0 and a single point 2.0 above it: nearest distance is 2.0,
+    # measured to the plane surface (not just its corner vertices).
+    plane = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1), i_size=4, j_size=4)
+    point = pv.PolyData(np.array([[0.0, 0.0, 2.0]]))
+
+    dist, pa, pb = min_distance_between(point, plane)
+    assert dist == pytest.approx(2.0, abs=1e-6)
+    assert pa[2] == pytest.approx(2.0)
+    assert pb[2] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_min_distance_is_symmetric() -> None:
+    a = pv.Sphere(radius=1.0, center=(0, 0, 0))
+    b = pv.Sphere(radius=1.0, center=(5, 0, 0))
+    d1, _, _ = min_distance_between(a, b)
+    d2, _, _ = min_distance_between(b, a)
+    # Surfaces are 1 unit from each centre; centres are 5 apart -> gap ~3.0.
+    assert d1 == pytest.approx(d2, abs=1e-6)
+    assert d1 == pytest.approx(3.0, abs=0.05)
 
 
 def test_external_plotter_is_used() -> None:

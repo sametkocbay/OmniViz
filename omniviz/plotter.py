@@ -41,6 +41,50 @@ def _hermite_basis(s: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
     )
 
 
+def _closest_points(query: np.ndarray, target: pv.DataSet) -> tuple[np.ndarray, np.ndarray]:
+    """For each point in ``query`` return its distance to ``target`` and the
+    closest point found on ``target``.
+
+    Uses a cell locator (point-to-surface) when ``target`` has cells, otherwise
+    falls back to a point-to-point locator. Both are bundled with VTK.
+    """
+    if target.n_cells > 0:
+        _, closest = target.find_closest_cell(query, return_closest_point=True)
+        closest = np.asarray(closest).reshape(-1, 3)
+    else:
+        tgt_pts = np.asarray(target.points)
+        idx = [target.find_closest_point(p) for p in query]
+        closest = tgt_pts[idx]
+    dist = np.linalg.norm(query - closest, axis=1)
+    return dist, closest
+
+
+def min_distance_between(a: pv.DataSet, b: pv.DataSet) -> tuple[float, np.ndarray, np.ndarray]:
+    """Minimum distance between two geometries.
+
+    Returns ``(distance, point_on_a, point_on_b)``. Computed symmetrically
+    (A→B and B→A) so it is accurate for e.g. a sparsely-sampled wire against a
+    boundary surface.
+    """
+    pts_a = np.asarray(a.points)
+    pts_b = np.asarray(b.points)
+    if pts_a.size == 0 or pts_b.size == 0:
+        raise ValueError("both geometries must have points to measure distance")
+
+    # A's points -> closest point on B
+    d_ab, closest_on_b = _closest_points(pts_a, b)
+    i = int(np.argmin(d_ab))
+    best = (float(d_ab[i]), pts_a[i].copy(), closest_on_b[i].copy())
+
+    # B's points -> closest point on A (catches the case where A is the coarse one)
+    d_ba, closest_on_a = _closest_points(pts_b, a)
+    j = int(np.argmin(d_ba))
+    if d_ba[j] < best[0]:
+        best = (float(d_ba[j]), closest_on_a[j].copy(), pts_b[j].copy())
+
+    return best
+
+
 def reconstruct_boundary_surface(
     data: BoundaryData,
     n_phi: int = 60,
@@ -587,7 +631,14 @@ class UnifiedPlotter:
                 self._plotter.view_isometric()
             elif name == "flip":  # spin 180° to view from the far side
                 self._plotter.camera.Azimuth(180)
-                self._plotter.reset_camera_clipping_range()
+            # Re-assert mouse-rotation interaction: snapping to a view (or a
+            # stray key/gizmo event) can leave the VTK interactor in a style
+            # that no longer rotates. This is a no-op when already healthy.
+            try:
+                self._plotter.enable_trackball_style()
+            except Exception:  # noqa: BLE001
+                log.debug("enable_trackball_style failed", exc_info=True)
+            self._plotter.reset_camera_clipping_range()
             self._plotter.render()
         except Exception:  # noqa: BLE001
             log.debug("Set view '%s' failed", name, exc_info=True)

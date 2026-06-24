@@ -25,6 +25,23 @@ def test_parse_fortran_float_invalid() -> None:
     assert math.isnan(oio.parse_fortran_float(""))
 
 
+def test_categorize_boundary_prefix(tmp_path) -> None:
+    from omniviz.gui.panels import categorize_files
+
+    (tmp_path / "boundary.txt").write_text("1 2 3\n")
+    (tmp_path / "boundary_inner.txt").write_text("1 2 3\n")
+    (tmp_path / "boundary_outer.txt").write_text("1 2 3\n")
+    (tmp_path / "cloud.txt").write_text("1 2 3\n")
+
+    cats = categorize_files(tmp_path)
+    assert set(cats["boundary"]) == {
+        "boundary.txt",
+        "boundary_inner.txt",
+        "boundary_outer.txt",
+    }
+    assert "cloud.txt" not in cats["boundary"]
+
+
 def test_read_cariddi_mesh_indexing_and_type_split(tmp_path) -> None:
     # 8 nodes shared by a hex; reuse a subset for a tetra and a wedge.
     x = tmp_path / "x.dat"
