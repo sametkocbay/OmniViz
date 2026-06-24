@@ -76,8 +76,8 @@ from omniviz.gui.qt_panels import (  # noqa: E402
 )
 from omniviz.gui.qt_style import apply_theme, viz_background  # noqa: E402
 from omniviz.gui.theme import COLORMAPS  # noqa: E402
-from omniviz.models import ProfileItem, ViewItem  # noqa: E402
-from omniviz.plotter import UnifiedPlotter, min_distance_between  # noqa: E402
+from omniviz.models import ProfileItem, ViewItem, WireItem  # noqa: E402
+from omniviz.plotter import UnifiedPlotter, min_distance_between, wire_centerline  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -1050,6 +1050,12 @@ class MainWindow(QMainWindow):
     def _item_geometry(self, item: ViewItem):
         """Combine every actor dataset for ``item`` into one pyvista mesh."""
         import pyvista as pv
+
+        # For a wire, measure to the 1D centerline (spline) rather than the
+        # rendered tube surface, so the tube radius doesn't bias the distance.
+        if isinstance(item, WireItem):
+            pts = wire_centerline(item.r0, item.z0, item.alfa_wire_deg)
+            return pv.Spline(pts, len(pts) * 4)
 
         parts = []
         for handle in self.plotter._actors.get(item.id, []):

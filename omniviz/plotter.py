@@ -59,6 +59,28 @@ def _closest_points(query: np.ndarray, target: pv.DataSet) -> tuple[np.ndarray, 
     return dist, closest
 
 
+def wire_centerline(r0: float, z0: float, alfa_wire_deg: float, n_phi: int = 200) -> np.ndarray:
+    """Closed-loop centerline points of a tilted circular current filament.
+
+    Returns an ``(n_phi + 1, 3)`` array (the loop is closed for a clean spline).
+    """
+    alfa = np.deg2rad(alfa_wire_deg)
+    t = np.linspace(0.0, 2.0 * np.pi, n_phi, endpoint=False)
+    x_local = r0 * np.cos(t)
+    y_local = r0 * np.sin(t)
+    # Rotate the coil plane about the Y axis by alfa.
+    x_rot = x_local * np.cos(alfa)
+    y_rot = y_local
+    z_rot = -x_local * np.sin(alfa) + z0
+    return np.column_stack(
+        [
+            np.append(x_rot, x_rot[0]),
+            np.append(y_rot, y_rot[0]),
+            np.append(z_rot, z_rot[0]),
+        ]
+    )
+
+
 def min_distance_between(a: pv.DataSet, b: pv.DataSet) -> tuple[float, np.ndarray, np.ndarray]:
     """Minimum distance between two geometries.
 
@@ -390,24 +412,7 @@ class UnifiedPlotter:
         item_id: str | None = None,
     ) -> UnifiedPlotter:
         """Add a tilted circular current filament loop."""
-        alfa = np.deg2rad(alfa_wire_deg)
-        t = np.linspace(0.0, 2.0 * np.pi, n_phi, endpoint=False)
-        x_local = r0 * np.cos(t)
-        y_local = r0 * np.sin(t)
-
-        # Rotate the coil plane about the Y axis by alfa.
-        x_rot = x_local * np.cos(alfa)
-        y_rot = y_local
-        z_rot = -x_local * np.sin(alfa) + z0
-
-        # Close the loop for a clean spline tube.
-        points = np.column_stack(
-            [
-                np.append(x_rot, x_rot[0]),
-                np.append(y_rot, y_rot[0]),
-                np.append(z_rot, z_rot[0]),
-            ]
-        )
+        points = wire_centerline(r0, z0, alfa_wire_deg, n_phi)
 
         radius = tube_radius if (tube_radius and tube_radius > 0) else r0 * 0.02
         tube = pv.Spline(points, n_phi * 4).tube(radius=radius)
