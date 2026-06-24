@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Generic, TypeVar
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QLocale, Qt
 from qtpy.QtGui import QDoubleValidator
 from qtpy.QtWidgets import (
     QCheckBox,
@@ -171,9 +171,16 @@ def _opacity_spin(default: float) -> QDoubleSpinBox:
 def _float_line_edit(default: str) -> QLineEdit:
     """A line edit that only accepts plain decimal numbers (no ``e`` exponent)."""
     le = QLineEdit(default)
+    # Always use '.' as the decimal separator regardless of the system locale
+    # (e.g. a German locale would otherwise treat '.' as a group separator and
+    # turn "2.01" into "201").
+    c_locale = QLocale.c()
+    c_locale.setNumberOptions(QLocale.NumberOption.RejectGroupSeparator)
     validator = QDoubleValidator(le)
+    validator.setLocale(c_locale)
     validator.setNotation(QDoubleValidator.Notation.StandardNotation)  # forbid '1e5' input
     validator.setDecimals(15)  # keep full precision for physics values
+    le.setLocale(c_locale)
     le.setValidator(validator)
     return le
 
