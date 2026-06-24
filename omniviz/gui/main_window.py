@@ -1054,8 +1054,13 @@ class MainWindow(QMainWindow):
         parts = []
         for handle in self.plotter._actors.get(item.id, []):
             ds = self._actor_dataset(handle)
-            if ds is not None and getattr(ds, "n_points", 0) > 0:
-                parts.append(pv.wrap(ds))
+            if ds is None:
+                continue
+            mesh = pv.wrap(ds)
+            if isinstance(mesh, pv.MultiBlock):
+                mesh = mesh.combine()  # composite (e.g. boundary patches) -> one grid
+            if mesh is not None and getattr(mesh, "n_points", 0) > 0:
+                parts.append(mesh)
         if not parts:
             return None
         if len(parts) == 1:

@@ -85,6 +85,21 @@ def test_min_distance_is_symmetric() -> None:
     assert d1 == pytest.approx(3.0, abs=0.05)
 
 
+def test_min_distance_with_combined_multiblock() -> None:
+    # A boundary is rendered as a MultiBlock; the GUI combines it before
+    # measuring. Confirm a combined grid still works against a line (wire).
+    boundary = pv.MultiBlock(
+        [
+            pv.Plane(center=(0, 0, 0), i_size=4, j_size=4),
+            pv.Plane(center=(0, 0, 1), i_size=4, j_size=4),
+        ]
+    ).combine()
+    wire = pv.Line((0, 0, 5), (1, 0, 5))  # 4 units above the top plane
+
+    dist, _, _ = min_distance_between(wire, boundary)
+    assert dist == pytest.approx(4.0, abs=1e-6)
+
+
 def test_external_plotter_is_used() -> None:
     try:
         external = pv.Plotter()
