@@ -31,6 +31,7 @@ def test_categorize_boundary_prefix(tmp_path) -> None:
     (tmp_path / "boundary.txt").write_text("1 2 3\n")
     (tmp_path / "boundary_inner.txt").write_text("1 2 3\n")
     (tmp_path / "boundary_outer.txt").write_text("1 2 3\n")
+    (tmp_path / "w7x_Boundary.dat").write_text("1 2 3\n")
     (tmp_path / "cloud.txt").write_text("1 2 3\n")
 
     cats = categorize_files(tmp_path)
@@ -38,6 +39,7 @@ def test_categorize_boundary_prefix(tmp_path) -> None:
         "boundary.txt",
         "boundary_inner.txt",
         "boundary_outer.txt",
+        "w7x_Boundary.dat",
     }
     assert "cloud.txt" not in cats["boundary"]
 

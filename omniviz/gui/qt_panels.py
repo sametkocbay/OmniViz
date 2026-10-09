@@ -19,6 +19,7 @@ from typing import Generic, TypeVar
 from qtpy.QtCore import QLocale, Qt
 from qtpy.QtGui import QDoubleValidator
 from qtpy.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -110,9 +111,9 @@ def categorize_files_qt(data_dir: Path) -> dict[str, list[str]]:
 
 
 class FilePicker(QWidget):
-    """A filterable, single-select list of file names."""
+    """A filterable list of file names (single-select unless ``multi``)."""
 
-    def __init__(self, files: Sequence[str]) -> None:
+    def __init__(self, files: Sequence[str], *, multi: bool = False) -> None:
         super().__init__()
         self._files = list(files)
 
@@ -125,6 +126,8 @@ class FilePicker(QWidget):
         layout.addWidget(self._search)
 
         self._list = QListWidget()
+        if multi:
+            self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self._list)
         self._refresh()
 
@@ -132,6 +135,12 @@ class FilePicker(QWidget):
     def selected(self) -> str | None:
         item = self._list.currentItem()
         return item.text() if item is not None else None
+
+    @property
+    def selected_files(self) -> list[str]:
+        """All selected file names, in list order."""
+        rows = sorted(self._list.row(i) for i in self._list.selectedItems())
+        return [self._list.item(r).text() for r in rows]
 
     def set_files(self, files: Sequence[str]) -> None:
         self._files = list(files)
@@ -195,6 +204,8 @@ class BasePanel(QWidget, Generic[T]):
 
     title: str = ""
     button_label: str = "Add to scene"
+    #: allow selecting several files at once (one item is added per file)
+    multi_select: bool = False
 
     def __init__(self, on_add: OnAdd, files: Sequence[str] | None = None) -> None:
         super().__init__()
@@ -212,7 +223,7 @@ class BasePanel(QWidget, Generic[T]):
 
         self._picker: FilePicker | None = None
         if self._needs_file_picker():
-            self._picker = FilePicker(self._files)
+            self._picker = FilePicker(self._files, multi=self.multi_select)
             root.addWidget(self._picker, stretch=1)
 
         options = QGroupBox("Options")
@@ -284,6 +295,7 @@ class PointCloudPanel(BasePanel[PointCloudItem]):
 
 class BoundaryPanel(BasePanel[BoundaryItem]):
     title = "Boundary Surface"
+    multi_select = True
 
     def _build_options(self, form: QFormLayout) -> None:
         self._color = _color_combo("cyan")
@@ -301,21 +313,40 @@ class BoundaryPanel(BasePanel[BoundaryItem]):
         self._edges = QCheckBox("Show edges")
         form.addRow(self._edges)
         self._label = QLineEdit()
-        self._label.setPlaceholderText("Boundary")
+        self._label.setPlaceholderText("(file name)")
         form.addRow("Label", self._label)
 
+    def build_items(self) -> list[BoundaryItem]:
+        """One item per selected file; extra files cycle through the palette."""
+        if not self._picker:
+            return []
+        files = self._picker.selected_files
+        base = self._color.currentText()
+        start = COLOR_PALETTE.index(base) if base in COLOR_PALETTE else 0
+        items = []
+        for i, f in enumerate(files):
+            label = self._label.text()
+            label = f"{label} ({f})" if label and len(files) > 1 else label or f
+            items.append(
+                BoundaryItem(
+                    file=f,
+                    label=label,
+                    color=COLOR_PALETTE[(start + i) % len(COLOR_PALETTE)],
+                    opacity=self._opacity.value(),
+                    n_phi=self._nphi.value(),
+                    n_s=self._ns.value(),
+                    show_edges=self._edges.isChecked(),
+                )
+            )
+        return items
+
     def build_item(self) -> BoundaryItem | None:
-        if not self._picker or not self._picker.selected:
-            return None
-        return BoundaryItem(
-            file=self._picker.selected,
-            label=self._label.text() or "Boundary",
-            color=self._color.currentText(),
-            opacity=self._opacity.value(),
-            n_phi=self._nphi.value(),
-            n_s=self._ns.value(),
-            show_edges=self._edges.isChecked(),
-        )
+        items = self.build_items()
+        return items[0] if items else None
+
+    def _handle_add(self) -> None:
+        for item in self.build_items():
+            self._on_add(item)
 
 
 class VtkMeshPanel(BasePanel[VtkMeshItem]):
